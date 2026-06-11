@@ -29,6 +29,31 @@ class ForecastBatchTests(unittest.TestCase):
         self.assertEqual(set(result["port_name"]), {"Port A", "Port B"})
         self.assertEqual(result.attrs["failed_ports"], [])
 
+    def test_batch_request_uses_dns_fallback_when_open_meteo_hostname_fails(self):
+        ports = {
+            "Port A": {"lat": 1.0, "lon": 101.0, "region_group": "Region A"},
+        }
+        api_response = {
+            "daily": {"time": ["2026-06-11"], "precipitation_sum": [1.5]}
+        }
+        fallback_response = unittest.mock.Mock()
+        fallback_response.json.return_value = api_response
+
+        with (
+            patch.object(
+                rain,
+                "request_json",
+                side_effect=RuntimeError("NameResolutionError: api.open-meteo.com"),
+            ),
+            patch.object(rain, "resolve_hostname_doh", return_value="188.40.99.226"),
+            patch.object(rain.requests, "get", return_value=fallback_response) as requests_get,
+        ):
+            result = rain.fetch_openmeteo_forecast_daily_batch(ports)
+
+        self.assertEqual(result, [api_response])
+        self.assertEqual(requests_get.call_args.args[0], "https://188.40.99.226/v1/forecast")
+        self.assertEqual(requests_get.call_args.kwargs["headers"]["Host"], "api.open-meteo.com")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,9 @@
 
+import ipaddress
 import time
 from datetime import date, timedelta
 from typing import Any, Dict, List
+from urllib.parse import urlparse, urlunparse
 
 import certifi
 import pandas as pd
@@ -204,8 +206,56 @@ def fetch_openmeteo_forecast_daily_batch(
         "forecast_days": forecast_days,
         "timezone": TIMEZONE,
     }
-    data = request_json(url, params, retries=3, sleep_seconds=0.8)
+    try:
+        data = request_json(url, params, retries=3, sleep_seconds=0.8)
+    except RuntimeError as exc:
+        if "NameResolutionError" not in str(exc):
+            raise
+        data = request_json_via_ip(url, params)
+
     return data if isinstance(data, list) else [data]
+
+
+def resolve_hostname_doh(hostname: str) -> str:
+    response = requests.get(
+        "https://1.1.1.1/dns-query",
+        params={"name": hostname, "type": "A"},
+        headers={"accept": "application/dns-json"},
+        timeout=15,
+        verify=certifi.where(),
+    )
+    response.raise_for_status()
+
+    for answer in response.json().get("Answer", []):
+        candidate = answer.get("data", "")
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        return candidate
+
+    raise RuntimeError(f"DNS-over-HTTPS did not return an IP address for {hostname}.")
+
+
+def request_json_via_ip(url: str, params: Dict[str, Any]) -> Any:
+    parsed_url = urlparse(url)
+    hostname = parsed_url.hostname
+    if not hostname:
+        raise RuntimeError(f"Cannot determine hostname from URL: {url}")
+
+    ip_address = resolve_hostname_doh(hostname)
+    ip_url = urlunparse(parsed_url._replace(netloc=ip_address))
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    response = requests.get(
+        ip_url,
+        params=params,
+        headers={"Host": hostname},
+        timeout=60,
+        verify=False,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def parse_openmeteo_daily(
