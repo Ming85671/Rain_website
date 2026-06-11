@@ -212,34 +212,48 @@ def parse_openmeteo_daily(
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def load_historical_data(start_date: str, end_date: str) -> pd.DataFrame:
     all_rows: List[Dict[str, Any]] = []
+    failed_ports: List[str] = []
 
     for port_name, port_info in PORTS.items():
-        data = fetch_openmeteo_historical_daily(
-            lat=port_info["lat"],
-            lon=port_info["lon"],
-            start_date=start_date,
-            end_date=end_date,
-        )
-        all_rows.extend(parse_openmeteo_daily(port_name, port_info, data, "historical"))
-        time.sleep(0.1)
+        try:
+            data = fetch_openmeteo_historical_daily(
+                lat=port_info["lat"],
+                lon=port_info["lon"],
+                start_date=start_date,
+                end_date=end_date,
+            )
+            all_rows.extend(parse_openmeteo_daily(port_name, port_info, data, "historical"))
+            time.sleep(0.1)
+        except Exception as exc:
+            failed_ports.append(f"{port_name}: {exc}")
+            continue
 
-    return make_daily_dataframe(all_rows)
+    df = make_daily_dataframe(all_rows)
+    df.attrs["failed_ports"] = failed_ports
+    return df
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def load_forecast_data(forecast_days: int) -> pd.DataFrame:
     all_rows: List[Dict[str, Any]] = []
+    failed_ports: List[str] = []
 
     for port_name, port_info in PORTS.items():
-        data = fetch_openmeteo_forecast_daily(
-            lat=port_info["lat"],
-            lon=port_info["lon"],
-            forecast_days=forecast_days,
-        )
-        all_rows.extend(parse_openmeteo_daily(port_name, port_info, data, "forecast"))
-        time.sleep(0.1)
+        try:
+            data = fetch_openmeteo_forecast_daily(
+                lat=port_info["lat"],
+                lon=port_info["lon"],
+                forecast_days=forecast_days,
+            )
+            all_rows.extend(parse_openmeteo_daily(port_name, port_info, data, "forecast"))
+            time.sleep(0.1)
+        except Exception as exc:
+            failed_ports.append(f"{port_name}: {exc}")
+            continue
 
-    return make_daily_dataframe(all_rows)
+    df = make_daily_dataframe(all_rows)
+    df.attrs["failed_ports"] = failed_ports
+    return df
 
 
 # ============================================================
@@ -499,6 +513,11 @@ def main() -> None:
                 end_date=pd.to_datetime(end_date).strftime("%Y-%m-%d"),
             )
 
+        failed_hist_ports = df_hist_daily.attrs.get("failed_ports", [])
+        if failed_hist_ports:
+            with st.expander(f"Historical data warning: {len(failed_hist_ports)} port requests failed"):
+                st.write("\n".join(failed_hist_ports))
+
         df_hist_monthly = historical_monthly_region_total(df_hist_daily)
 
         if not df_hist_monthly.empty:
@@ -515,6 +534,11 @@ def main() -> None:
 
         with st.spinner("Loading forecast Open-Meteo rainfall data..."):
             df_forecast_daily = load_forecast_data(forecast_days=7)
+
+        failed_forecast_ports = df_forecast_daily.attrs.get("failed_ports", [])
+        if failed_forecast_ports:
+            with st.expander(f"Forecast data warning: {len(failed_forecast_ports)} port requests failed"):
+                st.write("\n".join(failed_forecast_ports))
 
         df_forecast_region_daily = forecast_daily_region_total(df_forecast_daily)
         show_forecast_section(df_forecast_region_daily, selected_regions)
