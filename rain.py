@@ -82,6 +82,7 @@ REGION_ORDER = [
 ]
 
 TIMEZONE = "Asia/Manila"
+FORECAST_CACHE_VERSION = "2026-06-11-dns-fallback"
 
 
 # ============================================================
@@ -348,7 +349,11 @@ def load_historical_data_cached(start_date: str, end_date: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
-def load_forecast_data_today_cached(today_key: str, forecast_days: int = 7) -> pd.DataFrame:
+def load_forecast_data_today_cached(
+    today_key: str,
+    forecast_days: int = 7,
+    cache_version: str = FORECAST_CACHE_VERSION,
+) -> pd.DataFrame:
     """
     Forecast is always based on current day + future 7 days.
 
@@ -357,6 +362,7 @@ def load_forecast_data_today_cached(today_key: str, forecast_days: int = 7) -> p
     - today_key is only used to refresh the cache once per day.
     - It does NOT come from the sidebar date range.
     """
+    _ = cache_version
     all_rows: List[Dict[str, Any]] = []
     failed_ports: List[str] = []
 
@@ -713,6 +719,7 @@ def main() -> None:
             df_forecast_daily = load_forecast_data_today_cached(
                 today_key=today.strftime("%Y-%m-%d"),
                 forecast_days=7,
+                cache_version=FORECAST_CACHE_VERSION,
             )
 
         failed_forecast_ports = df_forecast_daily.attrs.get("failed_ports", [])
