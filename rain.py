@@ -1,5 +1,6 @@
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Dict, List
 
@@ -187,7 +188,9 @@ def fetch_openmeteo_forecast_daily(
         "forecast_days": forecast_days,
         "timezone": TIMEZONE,
     }
-    return request_json(url, params)
+    # Forecast should be fast. Use fewer retries than historical data,
+    # otherwise one bad port can make the page wait too long.
+    return request_json(url, params, retries=3, sleep_seconds=0.8)
 
 
 def parse_openmeteo_daily(
@@ -279,29 +282,48 @@ def load_historical_data_cached(start_date: str, end_date: str) -> pd.DataFrame:
     return df
 
 
+def fetch_one_forecast_port(port_name: str, port_info: Dict[str, Any], forecast_days: int) -> List[Dict[str, Any]]:
+    """
+    Fetch one port forecast. Used by ThreadPoolExecutor.
+    """
+    data = fetch_openmeteo_forecast_daily(
+        lat=port_info["lat"],
+        lon=port_info["lon"],
+        forecast_days=forecast_days,
+    )
+    return parse_openmeteo_daily(port_name, port_info, data, "forecast")
+
+
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def load_forecast_data_today_cached(today_key: str, forecast_days: int = 7) -> pd.DataFrame:
     """
     Forecast is always based on current day + future 7 days.
 
-    today_key is only used to refresh the cache once per day.
-    It does NOT come from the sidebar date range.
+    Faster version:
+    - Forecast requests are fetched concurrently instead of one by one.
+    - today_key is only used to refresh the cache once per day.
+    - It does NOT come from the sidebar date range.
     """
     all_rows: List[Dict[str, Any]] = []
     failed_ports: List[str] = []
 
-    for port_name, port_info in PORTS.items():
-        try:
-            data = fetch_openmeteo_forecast_daily(
-                lat=port_info["lat"],
-                lon=port_info["lon"],
-                forecast_days=forecast_days,
-            )
-            all_rows.extend(parse_openmeteo_daily(port_name, port_info, data, "forecast"))
-            time.sleep(0.05)
-        except Exception as exc:
-            failed_ports.append(f"{port_name}: {exc}")
-            continue
+    # 8 workers is usually a good balance for Streamlit Cloud:
+    # much faster than serial requests, but not too aggressive for the API.
+    max_workers = min(8, len(PORTS))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_port = {
+            executor.submit(fetch_one_forecast_port, port_name, port_info, forecast_days): port_name
+            for port_name, port_info in PORTS.items()
+        }
+
+        for future in as_completed(future_to_port):
+            port_name = future_to_port[future]
+            try:
+                rows = future.result()
+                all_rows.extend(rows)
+            except Exception as exc:
+                failed_ports.append(f"{port_name}: {exc}")
 
     df = make_daily_dataframe(all_rows)
     df.attrs["failed_ports"] = failed_ports
@@ -638,6 +660,7 @@ def main() -> None:
         # Forecast section
         st.header("2. Future 7 days rainfall")
         st.caption(f"Forecast is fixed from today: {today.strftime('%Y-%m-%d')}. It is not affected by historical date selections.")
+        st.caption("Forecast requests are loaded concurrently to improve speed.")
 
         with st.spinner("Loading today's Open-Meteo 7-day forecast..."):
             df_forecast_daily = load_forecast_data_today_cached(
