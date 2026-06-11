@@ -1,6 +1,5 @@
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Dict, List
 
@@ -92,7 +91,7 @@ def request_json(
     params: Dict[str, Any],
     retries: int = 5,
     sleep_seconds: float = 1.5,
-) -> Dict[str, Any]:
+) -> Any:
     """
     Request JSON data with stronger retry logic.
 
@@ -193,6 +192,22 @@ def fetch_openmeteo_forecast_daily(
     return request_json(url, params, retries=3, sleep_seconds=0.8)
 
 
+def fetch_openmeteo_forecast_daily_batch(
+    ports: Dict[str, Dict[str, Any]],
+    forecast_days: int = 7,
+) -> List[Dict[str, Any]]:
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": ",".join(str(port_info["lat"]) for port_info in ports.values()),
+        "longitude": ",".join(str(port_info["lon"]) for port_info in ports.values()),
+        "daily": "precipitation_sum",
+        "forecast_days": forecast_days,
+        "timezone": TIMEZONE,
+    }
+    data = request_json(url, params, retries=3, sleep_seconds=0.8)
+    return data if isinstance(data, list) else [data]
+
+
 def parse_openmeteo_daily(
     port_name: str,
     port_info: Dict[str, Any],
@@ -282,48 +297,30 @@ def load_historical_data_cached(start_date: str, end_date: str) -> pd.DataFrame:
     return df
 
 
-def fetch_one_forecast_port(port_name: str, port_info: Dict[str, Any], forecast_days: int) -> List[Dict[str, Any]]:
-    """
-    Fetch one port forecast. Used by ThreadPoolExecutor.
-    """
-    data = fetch_openmeteo_forecast_daily(
-        lat=port_info["lat"],
-        lon=port_info["lon"],
-        forecast_days=forecast_days,
-    )
-    return parse_openmeteo_daily(port_name, port_info, data, "forecast")
-
-
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def load_forecast_data_today_cached(today_key: str, forecast_days: int = 7) -> pd.DataFrame:
     """
     Forecast is always based on current day + future 7 days.
 
     Faster version:
-    - Forecast requests are fetched concurrently instead of one by one.
+    - All port forecasts are fetched in one Open-Meteo batch request.
     - today_key is only used to refresh the cache once per day.
     - It does NOT come from the sidebar date range.
     """
     all_rows: List[Dict[str, Any]] = []
     failed_ports: List[str] = []
 
-    # 8 workers is usually a good balance for Streamlit Cloud:
-    # much faster than serial requests, but not too aggressive for the API.
-    max_workers = min(8, len(PORTS))
+    try:
+        forecasts = fetch_openmeteo_forecast_daily_batch(PORTS, forecast_days)
+        if len(forecasts) != len(PORTS):
+            raise ValueError(
+                f"Expected {len(PORTS)} forecast locations, received {len(forecasts)}."
+            )
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_port = {
-            executor.submit(fetch_one_forecast_port, port_name, port_info, forecast_days): port_name
-            for port_name, port_info in PORTS.items()
-        }
-
-        for future in as_completed(future_to_port):
-            port_name = future_to_port[future]
-            try:
-                rows = future.result()
-                all_rows.extend(rows)
-            except Exception as exc:
-                failed_ports.append(f"{port_name}: {exc}")
+        for (port_name, port_info), forecast in zip(PORTS.items(), forecasts):
+            all_rows.extend(parse_openmeteo_daily(port_name, port_info, forecast, "forecast"))
+    except Exception as exc:
+        failed_ports = [f"{port_name}: {exc}" for port_name in PORTS]
 
     df = make_daily_dataframe(all_rows)
     df.attrs["failed_ports"] = failed_ports
@@ -660,7 +657,7 @@ def main() -> None:
         # Forecast section
         st.header("2. Future 7 days rainfall")
         st.caption(f"Forecast is fixed from today: {today.strftime('%Y-%m-%d')}. It is not affected by historical date selections.")
-        st.caption("Forecast requests are loaded concurrently to improve speed.")
+        st.caption("Forecast locations are loaded in one batch request to improve speed.")
 
         with st.spinner("Loading today's Open-Meteo 7-day forecast..."):
             df_forecast_daily = load_forecast_data_today_cached(
