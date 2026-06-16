@@ -127,5 +127,19 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "average_precipitation_mm"], 27.5)
 
 
+class HistoricalChartStyleTests(unittest.TestCase):
+    def test_rainfall_axis_max_rounds_above_highest_value(self):
+        self.assertEqual(rain.rainfall_axis_max([30.99]), 35)
+        self.assertEqual(rain.rainfall_axis_max([35.0]), 40)
+        self.assertEqual(rain.rainfall_axis_max([]), 5)
+
+    def test_year_color_map_keeps_2026_stable_when_more_years_are_selected(self):
+        first_map = rain.year_color_map([2024, 2025, 2026])
+        second_map = rain.year_color_map([2026, 2027])
+
+        self.assertEqual(first_map["2026"], "#0B5FFF")
+        self.assertEqual(second_map["2026"], "#0B5FFF")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 
 import ipaddress
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
@@ -84,6 +85,18 @@ REGION_ORDER = [
 
 MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 MONTH_LABEL_MAP = {index: month for index, month in enumerate(MONTH_ORDER, start=1)}
+MONTH_TICK_VALUES = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+YEAR_COLOR_OVERRIDES = {"2026": "#0B5FFF"}
+YEAR_COLOR_SEQUENCE = [
+    "#0B5FFF",
+    "#D97706",
+    "#059669",
+    "#7C3AED",
+    "#DC2626",
+    "#0891B2",
+    "#9333EA",
+    "#4B5563",
+]
 
 TIMEZONE = "Asia/Manila"
 FORECAST_CACHE_VERSION = "2026-06-16-batch-fallback"
@@ -747,6 +760,59 @@ def actual_port_count_by_region(df_daily: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
+def rainfall_axis_max(values: Any, step: int = 5) -> int:
+    numeric_values = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if numeric_values.empty:
+        return step
+
+    highest_value = float(numeric_values.max())
+    axis_max = math.ceil(highest_value / step) * step
+    if axis_max <= highest_value:
+        axis_max += step
+
+    return max(step, int(axis_max))
+
+
+def year_color_map(years: List[int]) -> Dict[str, str]:
+    color_map: Dict[str, str] = {}
+    next_color_index = 0
+
+    for year in sorted(years):
+        year_label = str(year)
+        if year_label in YEAR_COLOR_OVERRIDES:
+            color_map[year_label] = YEAR_COLOR_OVERRIDES[year_label]
+            continue
+
+        while YEAR_COLOR_SEQUENCE[next_color_index % len(YEAR_COLOR_SEQUENCE)] in color_map.values():
+            next_color_index += 1
+        color_map[year_label] = YEAR_COLOR_SEQUENCE[next_color_index % len(YEAR_COLOR_SEQUENCE)]
+        next_color_index += 1
+
+    return color_map
+
+
+def apply_historical_rainfall_axes(fig: Any, y_axis_max: int) -> None:
+    fig.update_layout(
+        height=430,
+        margin=dict(l=20, r=20, t=60, b=20),
+        plot_bgcolor="white",
+        xaxis=dict(
+            tickmode="array",
+            tickvals=MONTH_TICK_VALUES,
+            ticktext=MONTH_ORDER,
+            showgrid=False,
+        ),
+        yaxis=dict(
+            range=[0, y_axis_max],
+            tick0=0,
+            dtick=5,
+            showgrid=True,
+            gridcolor="#E5E7EB",
+            zeroline=False,
+        ),
+    )
+
+
 # ============================================================
 # Charts
 # ============================================================
@@ -762,6 +828,7 @@ def show_historical_region_charts(
 
     chart_df = df_seven_day[df_seven_day["region_group"].isin(selected_regions)].copy()
     primary_year = max(selected_years)
+    color_map = year_color_map(selected_years)
 
     for region in selected_regions:
         region_df = chart_df[chart_df["region_group"] == region].copy()
@@ -769,80 +836,65 @@ def show_historical_region_charts(
             continue
 
         primary_year_df = region_df[region_df["year"] == primary_year].copy()
+        y_axis_max = rainfall_axis_max(region_df["average_precipitation_mm"])
         st.subheader(region)
 
-        col1, col2 = st.columns(2)
+        fig_line = px.line(
+            region_df,
+            x="window_sort",
+            y="average_precipitation_mm",
+            color="year_label",
+            color_discrete_map=color_map,
+            markers=False,
+            category_orders={"year_label": [str(year) for year in selected_years]},
+            title=f"{region} 7-day average rainfall - line",
+            hover_data={
+                "hover_label": True,
+                "window_sort": False,
+                "average_precipitation_mm": ":.2f",
+                "port_count": True,
+                "observation_days": True,
+            },
+            labels={
+                "window_sort": "Month",
+                "average_precipitation_mm": "7-day average rainfall (mm/day)",
+                "year_label": "Year",
+                "hover_label": "Window",
+                "port_count": "Ports",
+                "observation_days": "Days",
+            },
+        )
+        fig_line.update_traces(line=dict(width=3))
+        apply_historical_rainfall_axes(fig_line, y_axis_max)
+        st.plotly_chart(fig_line, use_container_width=True)
 
-        with col1:
-            if primary_year_df.empty:
-                st.info(f"No {primary_year} 7-day average data available for {region}.")
-                continue
+        if primary_year_df.empty:
+            st.info(f"No {primary_year} 7-day average data available for {region}.")
+            continue
 
-            fig_bar = px.bar(
-                primary_year_df,
-                x="window_sort",
-                y="average_precipitation_mm",
-                title=f"{region} 7-day average rainfall - bar ({primary_year})",
-                hover_data={
-                    "hover_label": True,
-                    "window_sort": False,
-                    "average_precipitation_mm": ":.2f",
-                    "port_count": True,
-                    "observation_days": True,
-                },
-                labels={
-                    "window_sort": "Month",
-                    "average_precipitation_mm": "7-day average rainfall (mm/day)",
-                    "hover_label": "Window",
-                    "port_count": "Ports",
-                    "observation_days": "Days",
-                },
-            )
-            fig_bar.update_layout(
-                height=360,
-                margin=dict(l=20, r=20, t=60, b=20),
-                xaxis=dict(
-                    tickmode="array",
-                    tickvals=[1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335],
-                    ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-                ),
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        with col2:
-            fig_line = px.line(
-                region_df,
-                x="window_sort",
-                y="average_precipitation_mm",
-                color="year_label",
-                markers=False,
-                title=f"{region} 7-day average rainfall - line",
-                hover_data={
-                    "hover_label": True,
-                    "window_sort": False,
-                    "average_precipitation_mm": ":.2f",
-                    "port_count": True,
-                    "observation_days": True,
-                },
-                labels={
-                    "window_sort": "Month",
-                    "average_precipitation_mm": "7-day average rainfall (mm/day)",
-                    "year_label": "Year",
-                    "hover_label": "Window",
-                    "port_count": "Ports",
-                    "observation_days": "Days",
-                },
-            )
-            fig_line.update_layout(
-                height=360,
-                margin=dict(l=20, r=20, t=60, b=20),
-                xaxis=dict(
-                    tickmode="array",
-                    tickvals=[1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335],
-                    ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-                ),
-            )
-            st.plotly_chart(fig_line, use_container_width=True)
+        fig_bar = px.bar(
+            primary_year_df,
+            x="window_sort",
+            y="average_precipitation_mm",
+            title=f"{region} 7-day average rainfall - bar ({primary_year})",
+            hover_data={
+                "hover_label": True,
+                "window_sort": False,
+                "average_precipitation_mm": ":.2f",
+                "port_count": True,
+                "observation_days": True,
+            },
+            labels={
+                "window_sort": "Month",
+                "average_precipitation_mm": "7-day average rainfall (mm/day)",
+                "hover_label": "Window",
+                "port_count": "Ports",
+                "observation_days": "Days",
+            },
+        )
+        fig_bar.update_traces(marker_color=color_map.get(str(primary_year), "#0B5FFF"))
+        apply_historical_rainfall_axes(fig_bar, y_axis_max)
+        st.plotly_chart(fig_bar, use_container_width=True)
 
 
 def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regions: List[str]) -> None:
