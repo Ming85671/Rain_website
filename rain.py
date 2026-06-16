@@ -556,6 +556,81 @@ def historical_monthly_region_total(df_daily: pd.DataFrame) -> pd.DataFrame:
     return region_monthly
 
 
+def historical_seven_day_region_average(
+    df_daily: pd.DataFrame,
+    selected_years: List[int] | None = None,
+) -> pd.DataFrame:
+    if df_daily.empty:
+        return pd.DataFrame()
+
+    df = df_daily.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["precipitation_mm"] = pd.to_numeric(df["precipitation_mm"], errors="coerce")
+    df = df.dropna(subset=["date", "precipitation_mm"])
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df["year"] = df["date"].dt.year
+
+    if selected_years is not None:
+        df = df[df["year"].isin(selected_years)]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    year_start = pd.to_datetime(df["year"].astype(str) + "-01-01")
+    df["window_sort"] = (((df["date"] - year_start).dt.days // 7) * 7) + 1
+    df["window_start"] = year_start + pd.to_timedelta(df["window_sort"] - 1, unit="D")
+    df["month"] = df["window_start"].dt.strftime("%b")
+    df["month_number"] = df["window_start"].dt.month
+
+    region_window = (
+        df.groupby(
+            [
+                "region_group",
+                "year",
+                "month",
+                "month_number",
+                "window_sort",
+                "window_start",
+            ],
+            as_index=False,
+        )
+        .agg(
+            window_end=("date", "max"),
+            port_count=("port_name", "nunique"),
+            observation_days=("date", "nunique"),
+            average_precipitation_mm=("precipitation_mm", "mean"),
+        )
+    )
+
+    region_window["average_precipitation_mm"] = region_window[
+        "average_precipitation_mm"
+    ].round(2)
+    region_window["window_label"] = (
+        region_window["window_start"].dt.strftime("%b %-d")
+        + "-"
+        + region_window["window_end"].dt.strftime("%-d")
+    )
+    region_window["hover_label"] = (
+        region_window["window_start"].dt.strftime("%Y-%m-%d")
+        + " to "
+        + region_window["window_end"].dt.strftime("%Y-%m-%d")
+    )
+
+    region_window["region_group"] = pd.Categorical(
+        region_window["region_group"],
+        categories=REGION_ORDER,
+        ordered=True,
+    )
+    region_window = region_window.sort_values(["region_group", "year", "window_sort"])
+    region_window["region_group"] = region_window["region_group"].astype(str)
+    region_window["year_label"] = region_window["year"].astype(str)
+
+    return region_window
+
+
 def forecast_daily_region_total(df_daily: pd.DataFrame) -> pd.DataFrame:
     if df_daily.empty:
         return pd.DataFrame()
@@ -667,123 +742,96 @@ def actual_port_count_by_region(df_daily: pd.DataFrame) -> pd.DataFrame:
 # Charts
 # ============================================================
 
-def build_full_month_grid(
-    df_monthly: pd.DataFrame,
-    selected_regions: List[str],
-    selected_years: List[int],
-) -> pd.DataFrame:
-    """
-    Ensure every selected region/year has Jan-Dec on the x-axis.
-    Months without available data stay blank rather than disappearing.
-    """
-    if not selected_regions or not selected_years:
-        return pd.DataFrame()
-
-    base_rows = []
-    for region in selected_regions:
-        for year in selected_years:
-            for month_num, month_name in enumerate(MONTH_ORDER, start=1):
-                base_rows.append(
-                    {
-                        "region_group": region,
-                        "year": year,
-                        "month_num": month_num,
-                        "month": month_name,
-                        "year_label": str(year),
-                    }
-                )
-
-    base_df = pd.DataFrame(base_rows)
-
-    if df_monthly.empty:
-        base_df["port_count"] = pd.NA
-        base_df["observation_days"] = pd.NA
-        base_df["regional_total_precipitation_mm"] = pd.NA
-        base_df["seven_day_avg_precipitation_mm"] = pd.NA
-        return base_df
-
-    merge_cols = ["region_group", "year", "month_num", "month", "year_label"]
-    value_cols = [
-        "port_count",
-        "observation_days",
-        "regional_total_precipitation_mm",
-        "seven_day_avg_precipitation_mm",
-    ]
-
-    result = base_df.merge(
-        df_monthly[merge_cols + value_cols],
-        on=merge_cols,
-        how="left",
-    )
-
-    result["month"] = pd.Categorical(result["month"], categories=MONTH_ORDER, ordered=True)
-    result = result.sort_values(["region_group", "year", "month_num"])
-    result["month"] = result["month"].astype(str)
-
-    return result
-
-
 def show_historical_region_charts(
-    df_monthly: pd.DataFrame,
+    df_seven_day: pd.DataFrame,
     selected_regions: List[str],
     selected_years: List[int],
 ) -> None:
-    if df_monthly.empty:
-        st.warning("No historical monthly data available.")
+    if df_seven_day.empty:
+        st.warning("No historical 7-day average data available.")
         return
 
-    chart_df = build_full_month_grid(df_monthly, selected_regions, selected_years)
+    chart_df = df_seven_day[df_seven_day["region_group"].isin(selected_regions)].copy()
+    primary_year = max(selected_years)
 
     for region in selected_regions:
         region_df = chart_df[chart_df["region_group"] == region].copy()
         if region_df.empty:
             continue
 
+        primary_year_df = region_df[region_df["year"] == primary_year].copy()
         st.subheader(region)
 
         col1, col2 = st.columns(2)
 
         with col1:
+            if primary_year_df.empty:
+                st.info(f"No {primary_year} 7-day average data available for {region}.")
+                continue
+
             fig_bar = px.bar(
-                region_df,
-                x="month",
-                y="seven_day_avg_precipitation_mm",
-                color="year_label",
-                barmode="group",
-                category_orders={"month": MONTH_ORDER, "year_label": [str(y) for y in selected_years]},
-                title=f"{region} 7-day average rainfall - bar",
+                primary_year_df,
+                x="window_sort",
+                y="average_precipitation_mm",
+                title=f"{region} 7-day average rainfall - bar ({primary_year})",
+                hover_data={
+                    "hover_label": True,
+                    "window_sort": False,
+                    "average_precipitation_mm": ":.2f",
+                    "port_count": True,
+                    "observation_days": True,
+                },
                 labels={
-                    "month": "Month",
-                    "seven_day_avg_precipitation_mm": "7-day average rainfall (mm)",
-                    "year_label": "Year",
+                    "window_sort": "Month",
+                    "average_precipitation_mm": "7-day average rainfall (mm/day)",
+                    "hover_label": "Window",
+                    "port_count": "Ports",
+                    "observation_days": "Days",
                 },
             )
             fig_bar.update_layout(
                 height=360,
                 margin=dict(l=20, r=20, t=60, b=20),
-                xaxis_type="category",
+                xaxis=dict(
+                    tickmode="array",
+                    tickvals=[1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335],
+                    ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+                ),
             )
             st.plotly_chart(fig_bar, use_container_width=True)
 
         with col2:
             fig_line = px.line(
                 region_df,
-                x="month",
-                y="seven_day_avg_precipitation_mm",
+                x="window_sort",
+                y="average_precipitation_mm",
                 color="year_label",
                 markers=True,
-                category_orders={"month": MONTH_ORDER, "year_label": [str(y) for y in selected_years]},
                 title=f"{region} 7-day average rainfall - line",
+                hover_data={
+                    "hover_label": True,
+                    "window_sort": False,
+                    "average_precipitation_mm": ":.2f",
+                    "port_count": True,
+                    "observation_days": True,
+                },
                 labels={
-                    "month": "Month",
-                    "seven_day_avg_precipitation_mm": "7-day average rainfall (mm)",
+                    "window_sort": "Month",
+                    "average_precipitation_mm": "7-day average rainfall (mm/day)",
                     "year_label": "Year",
+                    "hover_label": "Window",
+                    "port_count": "Ports",
+                    "observation_days": "Days",
                 },
             )
             fig_line.update_layout(
                 height=360,
                 margin=dict(l=20, r=20, t=60, b=20),
-                xaxis_type="category",
+                xaxis=dict(
+                    tickmode="array",
+                    tickvals=[1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335],
+                    ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+                ),
             )
             st.plotly_chart(fig_line, use_container_width=True)
 
@@ -867,8 +915,9 @@ def main() -> None:
         default=REGION_ORDER,
     )
 
-    st.sidebar.caption("Historical charts show 7-day average rainfall by month.")
+    st.sidebar.caption("Historical charts show one average rainfall point every 7 days.")
     st.sidebar.caption("Historical year options are capped at the current year.")
+    st.sidebar.caption("Current-year historical data is capped at today.")
     st.sidebar.caption("Forecast is always today + future 7 days.")
     st.sidebar.caption("Data source: Open-Meteo API. Unit: mm.")
 
@@ -890,8 +939,7 @@ def main() -> None:
         # Historical section
         st.header("1. Historical 7-day average rainfall by region")
         st.caption(
-            "The historical bar and line charts use monthly rainfall converted to a 7-day average: "
-            "monthly regional rainfall / observed days × 7."
+            "Each historical bar or line point is the average rainfall inside one non-overlapping 7-day window."
         )
 
         with st.spinner("Loading historical Open-Meteo rainfall data..."):
@@ -906,20 +954,19 @@ def main() -> None:
             with st.expander(f"Historical data warning: {len(failed_hist_ports)} port requests failed"):
                 st.write("\n".join(failed_hist_ports))
 
-        df_hist_monthly = historical_monthly_region_total(df_hist_daily)
-        df_hist_monthly_selected = df_hist_monthly[
-            df_hist_monthly["region_group"].isin(selected_regions)
-            & df_hist_monthly["year"].isin(selected_years)
-        ].copy() if not df_hist_monthly.empty else pd.DataFrame()
+        df_hist_seven_day = historical_seven_day_region_average(df_hist_daily, selected_years)
+        df_hist_seven_day_selected = df_hist_seven_day[
+            df_hist_seven_day["region_group"].isin(selected_regions)
+        ].copy() if not df_hist_seven_day.empty else pd.DataFrame()
 
-        if not df_hist_monthly_selected.empty:
+        if not df_hist_seven_day_selected.empty:
             st.dataframe(
-                df_hist_monthly_selected,
+                df_hist_seven_day_selected,
                 use_container_width=True,
                 hide_index=True,
             )
 
-        show_historical_region_charts(df_hist_monthly_selected, selected_regions, selected_years)
+        show_historical_region_charts(df_hist_seven_day_selected, selected_regions, selected_years)
 
         # Forecast section
         st.header("2. Future 7 days rainfall")

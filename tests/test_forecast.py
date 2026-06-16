@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
+
 import rain
 
 
@@ -53,6 +55,53 @@ class ForecastBatchTests(unittest.TestCase):
         self.assertEqual(result, [api_response])
         self.assertEqual(requests_get.call_args.args[0], "https://188.40.99.226/v1/forecast")
         self.assertEqual(requests_get.call_args.kwargs["headers"]["Host"], "api.open-meteo.com")
+
+
+class HistoricalSevenDayAverageTests(unittest.TestCase):
+    def test_historical_seven_day_region_average_uses_non_overlapping_windows(self):
+        rows = []
+        for day, precipitation in enumerate(range(1, 16), start=1):
+            rows.append(
+                {
+                    "source": "OpenMeteo",
+                    "data_type": "historical",
+                    "region_group": "Region A",
+                    "port_name": "Port A",
+                    "latitude": 1.0,
+                    "longitude": 101.0,
+                    "date": f"2026-01-{day:02d}",
+                    "precipitation_mm": precipitation,
+                }
+            )
+
+        result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
+
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result["year"].tolist(), [2026, 2026, 2026])
+        self.assertEqual(result["window_label"].tolist(), ["Jan 1-7", "Jan 8-14", "Jan 15-15"])
+        self.assertEqual(result["window_sort"].tolist(), [1, 8, 15])
+        self.assertEqual(result["average_precipitation_mm"].tolist(), [4.0, 11.0, 15.0])
+
+    def test_historical_seven_day_region_average_averages_ports_inside_window(self):
+        rows = [
+            {
+                "source": "OpenMeteo",
+                "data_type": "historical",
+                "region_group": "Region A",
+                "port_name": port_name,
+                "latitude": 1.0,
+                "longitude": 101.0,
+                "date": "2026-01-01",
+                "precipitation_mm": precipitation,
+            }
+            for port_name, precipitation in [("Port A", 2.0), ("Port B", 6.0)]
+        ]
+
+        result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
+
+        self.assertEqual(result.loc[0, "port_count"], 2)
+        self.assertEqual(result.loc[0, "observation_days"], 1)
+        self.assertEqual(result.loc[0, "average_precipitation_mm"], 4.0)
 
 
 if __name__ == "__main__":
