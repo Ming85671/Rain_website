@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import plotly.graph_objects as go
 
 import rain
 
@@ -139,6 +140,26 @@ class HistoricalChartStyleTests(unittest.TestCase):
 
         self.assertEqual(first_map["2026"], "#0B5FFF")
         self.assertEqual(second_map["2026"], "#0B5FFF")
+
+    def test_year_color_map_reserves_2026_color_from_other_years(self):
+        color_map = rain.year_color_map([2024, 2025, 2026, 2027])
+
+        for year_label, color in color_map.items():
+            if year_label != "2026":
+                self.assertNotEqual(color, "#0B5FFF")
+
+    def test_historical_axes_draw_top_horizontal_line(self):
+        fig = go.Figure()
+
+        rain.apply_historical_rainfall_axes(fig, 35)
+
+        self.assertEqual(len(fig.layout.shapes), 1)
+        top_line = fig.layout.shapes[0]
+        self.assertEqual(top_line.type, "line")
+        self.assertEqual(top_line.y0, 35)
+        self.assertEqual(top_line.y1, 35)
+        self.assertEqual(top_line.xref, "paper")
+        self.assertEqual(top_line.yref, "y")
 
 
 if __name__ == "__main__":

@@ -775,6 +775,7 @@ def rainfall_axis_max(values: Any, step: int = 5) -> int:
 
 def year_color_map(years: List[int]) -> Dict[str, str]:
     color_map: Dict[str, str] = {}
+    reserved_colors = set(YEAR_COLOR_OVERRIDES.values())
     next_color_index = 0
 
     for year in sorted(years):
@@ -783,7 +784,10 @@ def year_color_map(years: List[int]) -> Dict[str, str]:
             color_map[year_label] = YEAR_COLOR_OVERRIDES[year_label]
             continue
 
-        while YEAR_COLOR_SEQUENCE[next_color_index % len(YEAR_COLOR_SEQUENCE)] in color_map.values():
+        while (
+            YEAR_COLOR_SEQUENCE[next_color_index % len(YEAR_COLOR_SEQUENCE)] in color_map.values()
+            or YEAR_COLOR_SEQUENCE[next_color_index % len(YEAR_COLOR_SEQUENCE)] in reserved_colors
+        ):
             next_color_index += 1
         color_map[year_label] = YEAR_COLOR_SEQUENCE[next_color_index % len(YEAR_COLOR_SEQUENCE)]
         next_color_index += 1
@@ -792,6 +796,7 @@ def year_color_map(years: List[int]) -> Dict[str, str]:
 
 
 def apply_historical_rainfall_axes(fig: Any, y_axis_max: int) -> None:
+    grid_color = "#E5E7EB"
     fig.update_layout(
         height=430,
         margin=dict(l=20, r=20, t=60, b=20),
@@ -807,9 +812,22 @@ def apply_historical_rainfall_axes(fig: Any, y_axis_max: int) -> None:
             tick0=0,
             dtick=5,
             showgrid=True,
-            gridcolor="#E5E7EB",
+            gridcolor=grid_color,
             zeroline=False,
         ),
+        shapes=[
+            dict(
+                type="line",
+                xref="paper",
+                yref="y",
+                x0=0,
+                x1=1,
+                y0=y_axis_max,
+                y1=y_axis_max,
+                line=dict(color=grid_color, width=1),
+                layer="below",
+            )
+        ],
     )
 
 
