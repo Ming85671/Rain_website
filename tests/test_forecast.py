@@ -148,15 +148,20 @@ class HistoricalChartStyleTests(unittest.TestCase):
             if year_label != "2026":
                 self.assertNotEqual(color, "#0B5FFF")
 
-    def test_historical_axes_draw_top_horizontal_line(self):
+    def test_historical_axes_draw_bottom_and_top_horizontal_lines(self):
         fig = go.Figure()
 
         rain.apply_historical_rainfall_axes(fig, 35)
 
-        self.assertEqual(len(fig.layout.shapes), 1)
-        top_line = fig.layout.shapes[0]
+        self.assertEqual(len(fig.layout.shapes), 2)
+        lines_by_y = {line.y0: line for line in fig.layout.shapes}
+        bottom_line = lines_by_y[0]
+        top_line = lines_by_y[35]
+        self.assertEqual(bottom_line.type, "line")
+        self.assertEqual(bottom_line.y1, 0)
+        self.assertEqual(bottom_line.xref, "paper")
+        self.assertEqual(bottom_line.yref, "y")
         self.assertEqual(top_line.type, "line")
-        self.assertEqual(top_line.y0, 35)
         self.assertEqual(top_line.y1, 35)
         self.assertEqual(top_line.xref, "paper")
         self.assertEqual(top_line.yref, "y")
