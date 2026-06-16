@@ -161,6 +161,19 @@ class HistoricalChartStyleTests(unittest.TestCase):
         self.assertEqual(top_line.xref, "paper")
         self.assertEqual(top_line.yref, "y")
 
+    def test_year_trace_styles_keep_2026_dominant_and_quiet_other_years(self):
+        fig = go.Figure()
+        fig.add_scatter(name="2025", x=[1, 8], y=[4.0, 7.0])
+        fig.add_scatter(name="2026", x=[1, 8], y=[5.0, 8.0])
+
+        rain.apply_year_trace_styles(fig)
+
+        trace_by_name = {trace.name: trace for trace in fig.data}
+        self.assertEqual(trace_by_name["2026"].line.width, 3.5)
+        self.assertEqual(trace_by_name["2026"].opacity, 1.0)
+        self.assertEqual(trace_by_name["2025"].line.width, 1.8)
+        self.assertEqual(trace_by_name["2025"].opacity, 0.6)
+
 
 if __name__ == "__main__":
     unittest.main()

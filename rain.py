@@ -87,6 +87,10 @@ MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 MONTH_LABEL_MAP = {index: month for index, month in enumerate(MONTH_ORDER, start=1)}
 MONTH_TICK_VALUES = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
 YEAR_COLOR_OVERRIDES = {"2026": "#0B5FFF"}
+FOCUS_YEAR_LABEL = "2026"
+FOCUS_YEAR_LINE_WIDTH = 3.5
+COMPARISON_YEAR_LINE_WIDTH = 1.8
+COMPARISON_YEAR_OPACITY = 0.6
 YEAR_COLOR_SEQUENCE = [
     "#0B5FFF",
     "#D97706",
@@ -831,6 +835,14 @@ def apply_historical_rainfall_axes(fig: Any, y_axis_max: int) -> None:
     )
 
 
+def apply_year_trace_styles(fig: Any) -> None:
+    for trace in fig.data:
+        if str(trace.name) == FOCUS_YEAR_LABEL:
+            trace.update(line=dict(width=FOCUS_YEAR_LINE_WIDTH), opacity=1.0)
+        else:
+            trace.update(line=dict(width=COMPARISON_YEAR_LINE_WIDTH), opacity=COMPARISON_YEAR_OPACITY)
+
+
 # ============================================================
 # Charts
 # ============================================================
@@ -882,7 +894,7 @@ def show_historical_region_charts(
                 "observation_days": "Days",
             },
         )
-        fig_line.update_traces(line=dict(width=3))
+        apply_year_trace_styles(fig_line)
         apply_historical_rainfall_axes(fig_line, y_axis_max)
         st.plotly_chart(fig_line, use_container_width=True)
 
@@ -954,7 +966,6 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
         summary_df,
         x="region_group",
         y="total_7d_precipitation_mm",
-        title="Future 7 days total rainfall by region",
         labels={
             "region_group": "Region",
             "total_7d_precipitation_mm": "Rainfall (mm)",
@@ -962,10 +973,13 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
     )
     fig_total.update_layout(
         height=420,
-        margin=dict(l=20, r=20, t=60, b=20),
+        margin=dict(l=20, r=20, t=20, b=20),
         xaxis_type="category",
     )
-    st.plotly_chart(fig_total, use_container_width=True)
+    _, chart_column, _ = st.columns([1.25, 3.5, 1.25])
+    with chart_column:
+        st.markdown("**Future 7 days total rainfall by region**")
+        st.plotly_chart(fig_total, use_container_width=True)
 
 
 # ============================================================
