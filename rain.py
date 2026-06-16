@@ -1,7 +1,8 @@
 
 import ipaddress
 import time
-from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 from typing import Any, Dict, List
 from urllib.parse import urlparse, urlunparse
 
@@ -81,8 +82,12 @@ REGION_ORDER = [
     "Other-Check",
 ]
 
+MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+MONTH_LABEL_MAP = {index: month for index, month in enumerate(MONTH_ORDER, start=1)}
+
 TIMEZONE = "Asia/Manila"
-FORECAST_CACHE_VERSION = "2026-06-11-dns-fallback"
+FORECAST_CACHE_VERSION = "2026-06-16-batch-fallback"
+HISTORICAL_CACHE_VERSION = "2026-06-16-batch-fallback"
 
 
 # ============================================================
@@ -156,89 +161,42 @@ def safe_float(value: Any) -> float | None:
 
 
 # ============================================================
-# Open-Meteo API functions
+# DNS fallback helpers
 # ============================================================
 
-def fetch_openmeteo_historical_daily(
-    lat: float,
-    lon: float,
-    start_date: str,
-    end_date: str,
-) -> Dict[str, Any]:
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "start_date": start_date,
-        "end_date": end_date,
-        "daily": "precipitation_sum",
-        "timezone": TIMEZONE,
-    }
-    return request_json(url, params)
-
-
-def fetch_openmeteo_forecast_daily(
-    lat: float,
-    lon: float,
-    forecast_days: int = 7,
-) -> Dict[str, Any]:
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "daily": "precipitation_sum",
-        "forecast_days": forecast_days,
-        "timezone": TIMEZONE,
-    }
-    # Forecast should be fast. Use fewer retries than historical data,
-    # otherwise one bad port can make the page wait too long.
-    return request_json(url, params, retries=3, sleep_seconds=0.8)
-
-
-def fetch_openmeteo_forecast_daily_batch(
-    ports: Dict[str, Dict[str, Any]],
-    forecast_days: int = 7,
-) -> List[Dict[str, Any]]:
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": ",".join(str(port_info["lat"]) for port_info in ports.values()),
-        "longitude": ",".join(str(port_info["lon"]) for port_info in ports.values()),
-        "daily": "precipitation_sum",
-        "forecast_days": forecast_days,
-        "timezone": TIMEZONE,
-    }
-    try:
-        data = request_json(url, params, retries=3, sleep_seconds=0.8)
-    except RuntimeError as exc:
-        if "NameResolutionError" not in str(exc):
-            raise
-        data = request_json_via_ip(url, params)
-
-    return data if isinstance(data, list) else [data]
-
-
 def resolve_hostname_doh(hostname: str) -> str:
-    response = requests.get(
-        "https://1.1.1.1/dns-query",
-        params={"name": hostname, "type": "A"},
-        headers={"accept": "application/dns-json"},
-        timeout=15,
-        verify=certifi.where(),
-    )
-    response.raise_for_status()
+    """Resolve hostname using DNS-over-HTTPS. Only used when normal DNS fails."""
+    last_error: Exception | None = None
 
-    for answer in response.json().get("Answer", []):
-        candidate = answer.get("data", "")
+    for verify_ssl in [True, False]:
         try:
-            ipaddress.ip_address(candidate)
-        except ValueError:
-            continue
-        return candidate
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            response = requests.get(
+                "https://1.1.1.1/dns-query",
+                params={"name": hostname, "type": "A"},
+                headers={"accept": "application/dns-json"},
+                timeout=15,
+                verify=certifi.where() if verify_ssl else False,
+            )
+            response.raise_for_status()
 
-    raise RuntimeError(f"DNS-over-HTTPS did not return an IP address for {hostname}.")
+            for answer in response.json().get("Answer", []):
+                candidate = answer.get("data", "")
+                try:
+                    ipaddress.ip_address(candidate)
+                except ValueError:
+                    continue
+                return candidate
+
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    raise RuntimeError(f"DNS-over-HTTPS did not return an IP address for {hostname}. Last error: {last_error}")
 
 
 def request_json_via_ip(url: str, params: Dict[str, Any]) -> Any:
+    """Request an API through resolved IP, preserving original hostname with Host header."""
     parsed_url = urlparse(url)
     hostname = parsed_url.hostname
     if not hostname:
@@ -257,6 +215,97 @@ def request_json_via_ip(url: str, params: Dict[str, Any]) -> Any:
     )
     response.raise_for_status()
     return response.json()
+
+
+def request_openmeteo_with_dns_fallback(
+    url: str,
+    params: Dict[str, Any],
+    retries: int = 3,
+    sleep_seconds: float = 0.8,
+) -> Any:
+    """Normal Open-Meteo request first; if DNS fails, try DNS-over-HTTPS + IP fallback."""
+    try:
+        return request_json(url, params, retries=retries, sleep_seconds=sleep_seconds)
+    except RuntimeError as exc:
+        if "NameResolutionError" not in str(exc):
+            raise
+        return request_json_via_ip(url, params)
+
+
+# ============================================================
+# Open-Meteo API functions
+# ============================================================
+
+def fetch_openmeteo_historical_daily(
+    lat: float,
+    lon: float,
+    start_date: str,
+    end_date: str,
+) -> Dict[str, Any]:
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start_date,
+        "end_date": end_date,
+        "daily": "precipitation_sum",
+        "timezone": TIMEZONE,
+    }
+    return request_openmeteo_with_dns_fallback(url, params, retries=3, sleep_seconds=0.8)
+
+
+def fetch_openmeteo_forecast_daily(
+    lat: float,
+    lon: float,
+    forecast_days: int = 7,
+) -> Dict[str, Any]:
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "precipitation_sum",
+        "forecast_days": forecast_days,
+        "timezone": TIMEZONE,
+    }
+    # Forecast should be fast. Use fewer retries than historical data,
+    # otherwise one bad port can make the page wait too long.
+    return request_openmeteo_with_dns_fallback(url, params, retries=3, sleep_seconds=0.8)
+
+
+def fetch_openmeteo_historical_daily_batch(
+    ports: Dict[str, Dict[str, Any]],
+    start_date: str,
+    end_date: str,
+) -> List[Dict[str, Any]]:
+    """Try to fetch all historical locations in one Open-Meteo request."""
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": ",".join(str(port_info["lat"]) for port_info in ports.values()),
+        "longitude": ",".join(str(port_info["lon"]) for port_info in ports.values()),
+        "start_date": start_date,
+        "end_date": end_date,
+        "daily": "precipitation_sum",
+        "timezone": TIMEZONE,
+    }
+    data = request_openmeteo_with_dns_fallback(url, params, retries=3, sleep_seconds=0.8)
+    return data if isinstance(data, list) else [data]
+
+
+def fetch_openmeteo_forecast_daily_batch(
+    ports: Dict[str, Dict[str, Any]],
+    forecast_days: int = 7,
+) -> List[Dict[str, Any]]:
+    """Try to fetch all forecast locations in one Open-Meteo request."""
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": ",".join(str(port_info["lat"]) for port_info in ports.values()),
+        "longitude": ",".join(str(port_info["lon"]) for port_info in ports.values()),
+        "daily": "precipitation_sum",
+        "forecast_days": forecast_days,
+        "timezone": TIMEZONE,
+    }
+    data = request_openmeteo_with_dns_fallback(url, params, retries=3, sleep_seconds=0.8)
+    return data if isinstance(data, list) else [data]
 
 
 def parse_openmeteo_daily(
@@ -319,29 +368,93 @@ def make_daily_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
 # Cached data loading
 # ============================================================
 
-@st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
-def load_historical_data_cached(start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Load historical data once for the selected date range.
+def fetch_one_historical_port(port_name: str, port_info: Dict[str, Any], start_date: str, end_date: str) -> List[Dict[str, Any]]:
+    data = fetch_openmeteo_historical_daily(
+        lat=port_info["lat"],
+        lon=port_info["lon"],
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return parse_openmeteo_daily(port_name, port_info, data, "historical")
 
-    Cache ttl = 12 hours.
+
+def fetch_one_forecast_port(port_name: str, port_info: Dict[str, Any], forecast_days: int) -> List[Dict[str, Any]]:
+    data = fetch_openmeteo_forecast_daily(
+        lat=port_info["lat"],
+        lon=port_info["lon"],
+        forecast_days=forecast_days,
+    )
+    return parse_openmeteo_daily(port_name, port_info, data, "forecast")
+
+
+def fetch_historical_concurrently(start_date: str, end_date: str) -> tuple[List[Dict[str, Any]], List[str]]:
+    all_rows: List[Dict[str, Any]] = []
+    failed_ports: List[str] = []
+    max_workers = min(8, len(PORTS))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_port = {
+            executor.submit(fetch_one_historical_port, port_name, port_info, start_date, end_date): port_name
+            for port_name, port_info in PORTS.items()
+        }
+        for future in as_completed(future_to_port):
+            port_name = future_to_port[future]
+            try:
+                all_rows.extend(future.result())
+            except Exception as exc:
+                failed_ports.append(f"{port_name}: {exc}")
+
+    return all_rows, failed_ports
+
+
+def fetch_forecast_concurrently(forecast_days: int) -> tuple[List[Dict[str, Any]], List[str]]:
+    all_rows: List[Dict[str, Any]] = []
+    failed_ports: List[str] = []
+    max_workers = min(8, len(PORTS))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_port = {
+            executor.submit(fetch_one_forecast_port, port_name, port_info, forecast_days): port_name
+            for port_name, port_info in PORTS.items()
+        }
+        for future in as_completed(future_to_port):
+            port_name = future_to_port[future]
+            try:
+                all_rows.extend(future.result())
+            except Exception as exc:
+                failed_ports.append(f"{port_name}: {exc}")
+
+    return all_rows, failed_ports
+
+
+@st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
+def load_historical_data_cached(
+    start_date: str,
+    end_date: str,
+    cache_version: str = HISTORICAL_CACHE_VERSION,
+) -> pd.DataFrame:
     """
+    Load historical data.
+
+    Fast path: one Open-Meteo batch request for all locations.
+    Fallback: if batch fails or returns wrong location count, fetch ports concurrently.
+    """
+    _ = cache_version
     all_rows: List[Dict[str, Any]] = []
     failed_ports: List[str] = []
 
-    for port_name, port_info in PORTS.items():
-        try:
-            data = fetch_openmeteo_historical_daily(
-                lat=port_info["lat"],
-                lon=port_info["lon"],
-                start_date=start_date,
-                end_date=end_date,
-            )
-            all_rows.extend(parse_openmeteo_daily(port_name, port_info, data, "historical"))
-            time.sleep(0.05)
-        except Exception as exc:
-            failed_ports.append(f"{port_name}: {exc}")
-            continue
+    try:
+        historical_results = fetch_openmeteo_historical_daily_batch(PORTS, start_date, end_date)
+        if len(historical_results) != len(PORTS):
+            raise ValueError(f"Expected {len(PORTS)} historical locations, received {len(historical_results)}.")
+
+        for (port_name, port_info), historical in zip(PORTS.items(), historical_results):
+            all_rows.extend(parse_openmeteo_daily(port_name, port_info, historical, "historical"))
+
+    except Exception as batch_exc:
+        all_rows, failed_ports = fetch_historical_concurrently(start_date, end_date)
+        if failed_ports:
+            failed_ports.insert(0, f"Batch historical request failed first: {batch_exc}")
 
     df = make_daily_dataframe(all_rows)
     df.attrs["failed_ports"] = failed_ports
@@ -357,11 +470,10 @@ def load_forecast_data_today_cached(
     """
     Forecast is always based on current day + future 7 days.
 
-    Faster version:
-    - All port forecasts are fetched in one Open-Meteo batch request.
-    - today_key is only used to refresh the cache once per day.
-    - It does NOT come from the sidebar date range.
+    Fast path: one Open-Meteo batch request for all locations.
+    Fallback: if batch fails or returns wrong location count, fetch ports concurrently.
     """
+    _ = today_key
     _ = cache_version
     all_rows: List[Dict[str, Any]] = []
     failed_ports: List[str] = []
@@ -369,14 +481,15 @@ def load_forecast_data_today_cached(
     try:
         forecasts = fetch_openmeteo_forecast_daily_batch(PORTS, forecast_days)
         if len(forecasts) != len(PORTS):
-            raise ValueError(
-                f"Expected {len(PORTS)} forecast locations, received {len(forecasts)}."
-            )
+            raise ValueError(f"Expected {len(PORTS)} forecast locations, received {len(forecasts)}.")
 
         for (port_name, port_info), forecast in zip(PORTS.items(), forecasts):
             all_rows.extend(parse_openmeteo_daily(port_name, port_info, forecast, "forecast"))
-    except Exception as exc:
-        failed_ports = [f"{port_name}: {exc}" for port_name in PORTS]
+
+    except Exception as batch_exc:
+        all_rows, failed_ports = fetch_forecast_concurrently(forecast_days)
+        if failed_ports:
+            failed_ports.insert(0, f"Batch forecast request failed first: {batch_exc}")
 
     df = make_daily_dataframe(all_rows)
     df.attrs["failed_ports"] = failed_ports
@@ -388,14 +501,25 @@ def load_forecast_data_today_cached(
 # ============================================================
 
 def historical_monthly_region_total(df_daily: pd.DataFrame) -> pd.DataFrame:
+    """
+    Historical region monthly summary.
+
+    The chart metric is a 7-day average rainfall equivalent:
+
+        seven_day_avg_precipitation_mm = regional_total_precipitation_mm / observation_days * 7
+
+    This makes different months easier to compare because Feb/Mar/Apr have different day counts.
+    """
     if df_daily.empty:
         return pd.DataFrame()
 
     df = df_daily.copy()
-    df["month"] = df["date"].dt.to_period("M").astype(str)
+    df["year"] = df["date"].dt.year
+    df["month_num"] = df["date"].dt.month
+    df["month"] = df["month_num"].map(MONTH_LABEL_MAP)
 
     region_monthly = (
-        df.groupby(["region_group", "month"], as_index=False)
+        df.groupby(["region_group", "year", "month_num", "month"], as_index=False)
         .agg(
             port_count=("port_name", "nunique"),
             observation_days=("date", "nunique"),
@@ -407,13 +531,27 @@ def historical_monthly_region_total(df_daily: pd.DataFrame) -> pd.DataFrame:
         "regional_total_precipitation_mm"
     ].round(2)
 
+    region_monthly["seven_day_avg_precipitation_mm"] = (
+        region_monthly["regional_total_precipitation_mm"]
+        / region_monthly["observation_days"].replace(0, pd.NA)
+        * 7
+    ).round(2)
+
+    region_monthly["year_label"] = region_monthly["year"].astype(str)
+
     region_monthly["region_group"] = pd.Categorical(
         region_monthly["region_group"],
         categories=REGION_ORDER,
         ordered=True,
     )
-    region_monthly = region_monthly.sort_values(["region_group", "month"])
+    region_monthly["month"] = pd.Categorical(
+        region_monthly["month"],
+        categories=MONTH_ORDER,
+        ordered=True,
+    )
+    region_monthly = region_monthly.sort_values(["region_group", "year", "month_num"])
     region_monthly["region_group"] = region_monthly["region_group"].astype(str)
+    region_monthly["month"] = region_monthly["month"].astype(str)
 
     return region_monthly
 
@@ -529,12 +667,72 @@ def actual_port_count_by_region(df_daily: pd.DataFrame) -> pd.DataFrame:
 # Charts
 # ============================================================
 
-def show_historical_region_charts(df_monthly: pd.DataFrame, selected_regions: List[str]) -> None:
+def build_full_month_grid(
+    df_monthly: pd.DataFrame,
+    selected_regions: List[str],
+    selected_years: List[int],
+) -> pd.DataFrame:
+    """
+    Ensure every selected region/year has Jan-Dec on the x-axis.
+    Months without available data stay blank rather than disappearing.
+    """
+    if not selected_regions or not selected_years:
+        return pd.DataFrame()
+
+    base_rows = []
+    for region in selected_regions:
+        for year in selected_years:
+            for month_num, month_name in enumerate(MONTH_ORDER, start=1):
+                base_rows.append(
+                    {
+                        "region_group": region,
+                        "year": year,
+                        "month_num": month_num,
+                        "month": month_name,
+                        "year_label": str(year),
+                    }
+                )
+
+    base_df = pd.DataFrame(base_rows)
+
+    if df_monthly.empty:
+        base_df["port_count"] = pd.NA
+        base_df["observation_days"] = pd.NA
+        base_df["regional_total_precipitation_mm"] = pd.NA
+        base_df["seven_day_avg_precipitation_mm"] = pd.NA
+        return base_df
+
+    merge_cols = ["region_group", "year", "month_num", "month", "year_label"]
+    value_cols = [
+        "port_count",
+        "observation_days",
+        "regional_total_precipitation_mm",
+        "seven_day_avg_precipitation_mm",
+    ]
+
+    result = base_df.merge(
+        df_monthly[merge_cols + value_cols],
+        on=merge_cols,
+        how="left",
+    )
+
+    result["month"] = pd.Categorical(result["month"], categories=MONTH_ORDER, ordered=True)
+    result = result.sort_values(["region_group", "year", "month_num"])
+    result["month"] = result["month"].astype(str)
+
+    return result
+
+
+def show_historical_region_charts(
+    df_monthly: pd.DataFrame,
+    selected_regions: List[str],
+    selected_years: List[int],
+) -> None:
     if df_monthly.empty:
         st.warning("No historical monthly data available.")
         return
 
-    chart_df = df_monthly[df_monthly["region_group"].isin(selected_regions)].copy()
+    chart_df = build_full_month_grid(df_monthly, selected_regions, selected_years)
 
     for region in selected_regions:
         region_df = chart_df[chart_df["region_group"] == region].copy()
@@ -549,11 +747,15 @@ def show_historical_region_charts(df_monthly: pd.DataFrame, selected_regions: Li
             fig_bar = px.bar(
                 region_df,
                 x="month",
-                y="regional_total_precipitation_mm",
-                title=f"{region} monthly rainfall - bar",
+                y="seven_day_avg_precipitation_mm",
+                color="year_label",
+                barmode="group",
+                category_orders={"month": MONTH_ORDER, "year_label": [str(y) for y in selected_years]},
+                title=f"{region} 7-day average rainfall - bar",
                 labels={
                     "month": "Month",
-                    "regional_total_precipitation_mm": "Rainfall (mm)",
+                    "seven_day_avg_precipitation_mm": "7-day average rainfall (mm)",
+                    "year_label": "Year",
                 },
             )
             fig_bar.update_layout(
@@ -567,12 +769,15 @@ def show_historical_region_charts(df_monthly: pd.DataFrame, selected_regions: Li
             fig_line = px.line(
                 region_df,
                 x="month",
-                y="regional_total_precipitation_mm",
+                y="seven_day_avg_precipitation_mm",
+                color="year_label",
                 markers=True,
-                title=f"{region} monthly rainfall - line",
+                category_orders={"month": MONTH_ORDER, "year_label": [str(y) for y in selected_years]},
+                title=f"{region} 7-day average rainfall - line",
                 labels={
                     "month": "Month",
-                    "regional_total_precipitation_mm": "Rainfall (mm)",
+                    "seven_day_avg_precipitation_mm": "7-day average rainfall (mm)",
+                    "year_label": "Year",
                 },
             )
             fig_line.update_layout(
@@ -642,26 +847,19 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
 
 def main() -> None:
     today = date.today()
-    default_start = max(date(today.year, 1, 1), today - timedelta(days=365))
-    default_end = today
-
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Select page", ["Philippine rain"])
 
     st.sidebar.divider()
     st.sidebar.subheader("Historical settings")
 
-    start_date = st.sidebar.date_input(
-        "Historical start date",
-        value=default_start,
-        max_value=today,
+    year_options = list(range(today.year, 2019, -1))
+    selected_years = st.sidebar.multiselect(
+        "Historical years",
+        options=year_options,
+        default=[today.year],
     )
-
-    end_date = st.sidebar.date_input(
-        "Historical end date",
-        value=default_end,
-        max_value=today,
-    )
+    selected_years = sorted(selected_years)
 
     selected_regions = st.sidebar.multiselect(
         "Regions",
@@ -669,7 +867,8 @@ def main() -> None:
         default=REGION_ORDER,
     )
 
-    st.sidebar.caption("Historical date selectors are capped at today.")
+    st.sidebar.caption("Historical charts show 7-day average rainfall by month.")
+    st.sidebar.caption("Historical year options are capped at the current year.")
     st.sidebar.caption("Forecast is always today + future 7 days.")
     st.sidebar.caption("Data source: Open-Meteo API. Unit: mm.")
 
@@ -681,17 +880,25 @@ def main() -> None:
             st.warning("Please select at least one region in the sidebar.")
             return
 
-        if pd.to_datetime(start_date) > pd.to_datetime(end_date):
-            st.error("Historical start date must be earlier than end date.")
+        if not selected_years:
+            st.warning("Please select at least one historical year in the sidebar.")
             return
 
+        historical_start_date = date(min(selected_years), 1, 1)
+        historical_end_date = min(date(max(selected_years), 12, 31), today)
+
         # Historical section
-        st.header("1. Historical monthly rainfall by region")
+        st.header("1. Historical 7-day average rainfall by region")
+        st.caption(
+            "The historical bar and line charts use monthly rainfall converted to a 7-day average: "
+            "monthly regional rainfall / observed days × 7."
+        )
 
         with st.spinner("Loading historical Open-Meteo rainfall data..."):
             df_hist_daily = load_historical_data_cached(
-                start_date=pd.to_datetime(start_date).strftime("%Y-%m-%d"),
-                end_date=pd.to_datetime(end_date).strftime("%Y-%m-%d"),
+                start_date=historical_start_date.strftime("%Y-%m-%d"),
+                end_date=historical_end_date.strftime("%Y-%m-%d"),
+                cache_version=HISTORICAL_CACHE_VERSION,
             )
 
         failed_hist_ports = df_hist_daily.attrs.get("failed_ports", [])
@@ -700,20 +907,24 @@ def main() -> None:
                 st.write("\n".join(failed_hist_ports))
 
         df_hist_monthly = historical_monthly_region_total(df_hist_daily)
+        df_hist_monthly_selected = df_hist_monthly[
+            df_hist_monthly["region_group"].isin(selected_regions)
+            & df_hist_monthly["year"].isin(selected_years)
+        ].copy() if not df_hist_monthly.empty else pd.DataFrame()
 
-        if not df_hist_monthly.empty:
+        if not df_hist_monthly_selected.empty:
             st.dataframe(
-                df_hist_monthly[df_hist_monthly["region_group"].isin(selected_regions)],
+                df_hist_monthly_selected,
                 use_container_width=True,
                 hide_index=True,
             )
 
-        show_historical_region_charts(df_hist_monthly, selected_regions)
+        show_historical_region_charts(df_hist_monthly_selected, selected_regions, selected_years)
 
         # Forecast section
         st.header("2. Future 7 days rainfall")
         st.caption(f"Forecast is fixed from today: {today.strftime('%Y-%m-%d')}. It is not affected by historical date selections.")
-        st.caption("Forecast locations are loaded in one batch request to improve speed.")
+        st.caption("Forecast uses one batch request first. If batch fails, it automatically falls back to concurrent per-port requests.")
 
         with st.spinner("Loading today's Open-Meteo 7-day forecast..."):
             df_forecast_daily = load_forecast_data_today_cached(
