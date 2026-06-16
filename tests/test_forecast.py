@@ -103,6 +103,29 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "observation_days"], 1)
         self.assertEqual(result.loc[0, "average_precipitation_mm"], 4.0)
 
+    def test_historical_seven_day_region_average_groups_december_31_with_prior_week(self):
+        rows = []
+        for day in range(24, 32):
+            rows.append(
+                {
+                    "source": "OpenMeteo",
+                    "data_type": "historical",
+                    "region_group": "Region A",
+                    "port_name": "Port A",
+                    "latitude": 1.0,
+                    "longitude": 101.0,
+                    "date": f"2026-12-{day:02d}",
+                    "precipitation_mm": float(day),
+                }
+            )
+
+        result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.loc[0, "window_label"], "Dec 24-31")
+        self.assertEqual(result.loc[0, "observation_days"], 8)
+        self.assertEqual(result.loc[0, "average_precipitation_mm"], 27.5)
+
 
 if __name__ == "__main__":
     unittest.main()

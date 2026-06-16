@@ -582,6 +582,15 @@ def historical_seven_day_region_average(
     year_start = pd.to_datetime(df["year"].astype(str) + "-01-01")
     df["window_sort"] = (((df["date"] - year_start).dt.days // 7) * 7) + 1
     df["window_start"] = year_start + pd.to_timedelta(df["window_sort"] - 1, unit="D")
+
+    december_tail = (df["date"].dt.month == 12) & (df["date"].dt.day >= 24)
+    df.loc[december_tail, "window_start"] = pd.to_datetime(
+        df.loc[december_tail, "year"].astype(str) + "-12-24"
+    )
+    df.loc[december_tail, "window_sort"] = (
+        (df.loc[december_tail, "window_start"] - year_start.loc[december_tail]).dt.days + 1
+    )
+
     df["month"] = df["window_start"].dt.strftime("%b")
     df["month_number"] = df["window_start"].dt.month
 
@@ -806,7 +815,7 @@ def show_historical_region_charts(
                 x="window_sort",
                 y="average_precipitation_mm",
                 color="year_label",
-                markers=True,
+                markers=False,
                 title=f"{region} 7-day average rainfall - line",
                 hover_data={
                     "hover_label": True,
