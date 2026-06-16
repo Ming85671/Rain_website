@@ -983,14 +983,15 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
         },
     )
     fig_total.update_layout(
-        height=420,
+        width=430,
+        height=390,
         margin=dict(l=20, r=20, t=20, b=20),
         xaxis_type="category",
     )
-    _, chart_column, _ = st.columns([1.25, 3.5, 1.25])
+    st.markdown("**Future 7 days total rainfall by region**")
+    _, chart_column, _ = st.columns([2, 2, 2])
     with chart_column:
-        st.markdown("**Future 7 days total rainfall by region**")
-        st.plotly_chart(fig_total, use_container_width=True)
+        st.plotly_chart(fig_total, use_container_width=False)
 
 
 # ============================================================
