@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import pandas as pd
@@ -217,6 +218,212 @@ class WeeklyPanelTests(unittest.TestCase):
             }
         )
         assert_frame_equal(result, expected, check_dtype=False)
+
+
+class RainfallPanelTests(unittest.TestCase):
+    def test_build_rain_weekly_panel_averages_ports_then_days(self):
+        rain = pd.DataFrame(
+            {
+                "region_group": ["A"] * 5,
+                "port_name": ["P1", "P1", "P2", "P1", "P2"],
+                "date": [
+                    "2025-01-06 01:00",
+                    "2025-01-06 12:00",
+                    "2025-01-06",
+                    "2025-01-07",
+                    "2025-01-07",
+                ],
+                "precipitation_mm": [2.0, 4.0, 7.0, 4.0, 8.0],
+            }
+        )
+
+        result = ca.build_rain_weekly_panel(rain, ["2025-01-06"])
+
+        expected = pd.DataFrame(
+            {
+                "region_group": ["A"],
+                "week_start": pd.to_datetime(["2025-01-06"]),
+                "rain_mm_day": [5.5],
+                "rain_days": [2],
+                "min_ports": [2],
+            }
+        )
+        assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_build_rain_weekly_panel_rejects_bad_precipitation_with_row_indices(self):
+        rain = pd.DataFrame(
+            {
+                "region_group": ["A", "A", "A", "A"],
+                "port_name": ["P1", "P2", "P3", "P4"],
+                "date": [
+                    "2025-01-06",
+                    "bad-date",
+                    "2025-01-07",
+                    "2025-01-08",
+                ],
+                "precipitation_mm": [1.0, "trace", None, float("inf")],
+            },
+            index=[4, 9, 15, 22],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_rain_weekly_panel(rain, ["2025-01-06"])
+
+        self.assertEqual(
+            str(raised.exception),
+            "Invalid or missing precipitation_mm at rainfall rows: 9, 15, 22",
+        )
+
+    def test_build_rain_weekly_panel_drops_bad_dates_and_omits_missing_weeks(self):
+        rain = pd.DataFrame(
+            {
+                "region_group": ["A", "A", "B"],
+                "port_name": ["P1", "P1", "P2"],
+                "date": ["not-a-date", "2025-01-07", "2025-01-20"],
+                "precipitation_mm": [100.0, 3.0, 9.0],
+            }
+        )
+
+        result = ca.build_rain_weekly_panel(
+            rain,
+            pd.to_datetime(["2025-01-06", "2025-01-13"]),
+        )
+
+        self.assertEqual(result["region_group"].tolist(), ["A"])
+        self.assertEqual(result["week_start"].tolist(), [pd.Timestamp("2025-01-06")])
+        self.assertEqual(result["rain_mm_day"].tolist(), [3.0])
+
+    def test_add_weekly_anomalies_centers_each_metric_by_region_and_iso_week(self):
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A", "A", "B", "B"],
+                "week_start": pd.to_datetime(
+                    ["2024-01-01", "2024-12-30", "2024-01-01", "2024-12-30"]
+                ),
+                "rain_mm_day": [2.0, 6.0, 10.0, 14.0],
+                "shipments": [1.0, 5.0, 20.0, 22.0],
+                "volume_mt": [10.0, 40.0, 100.0, 300.0],
+            }
+        )
+
+        result = ca.add_weekly_anomalies(panel)
+
+        self.assertEqual(result["iso_week"].tolist(), [1, 1, 1, 1])
+        self.assertEqual(
+            result["rain_mm_day_anomaly"].tolist(), [-2.0, 2.0, -2.0, 2.0]
+        )
+        self.assertEqual(
+            result["shipments_anomaly"].tolist(), [-2.0, 2.0, -1.0, 1.0]
+        )
+        self.assertEqual(
+            result["volume_mt_anomaly"].tolist(), [-15.0, 15.0, -100.0, 100.0]
+        )
+
+
+class CorrelationTests(unittest.TestCase):
+    def test_correlation_drops_missing_pairs_before_pearson(self):
+        result = ca.correlation([1.0, 2.0, None, 4.0], [2.0, 4.0, 100.0, 8.0])
+
+        self.assertAlmostEqual(result, 1.0)
+
+    def test_correlation_pairs_series_by_position_not_index_label(self):
+        left = pd.Series([1.0, 2.0, 3.0], index=[10, 11, 12])
+        right = pd.Series([2.0, 4.0, 6.0], index=[20, 21, 22])
+
+        self.assertAlmostEqual(ca.correlation(left, right), 1.0)
+
+    def test_correlation_returns_nan_for_short_or_constant_pairs(self):
+        self.assertTrue(math.isnan(ca.correlation([1, 2], [2, 4])))
+        self.assertTrue(math.isnan(ca.correlation([1, 1, 1], [1, 2, 3])))
+        self.assertTrue(math.isnan(ca.correlation([1, 2, 3], [7, 7, 7])))
+
+    def test_spearman_ranks_average_ties(self):
+        result = ca.correlation([1, 2, 2, 4], [10, 20, 30, 40], rank=True)
+
+        self.assertAlmostEqual(result, 0.9486832980505138)
+
+    def test_lag_correlations_use_future_metrics_and_keep_metrics_separate(self):
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * 6,
+                "week_start": pd.date_range("2025-01-06", periods=6, freq="W-MON"),
+                "rain_mm_day": [1, 2, 3, 4, 5, 6],
+                "rain_mm_day_anomaly": [1, 2, 3, 4, 5, 6],
+                "shipments": [9, 8, 6, None, 4, 3],
+                "shipments_anomaly": [9, 8, 6, None, 4, 3],
+                "volume_mt": [90, 80, 10, 20, 30, 40],
+                "volume_mt_anomaly": [90, 80, 10, 20, 30, 40],
+            }
+        )
+
+        result = ca.calculate_lag_correlations(panel, max_lag=2)
+
+        self.assertEqual(set(result["metric"]), {"shipments", "volume_mt"})
+        lag_two = result[result["rain_leads_weeks"] == 2].set_index("metric")
+        self.assertAlmostEqual(lag_two.loc["shipments", "pearson_raw"], -1.0)
+        self.assertAlmostEqual(lag_two.loc["shipments", "spearman_raw"], -1.0)
+        self.assertAlmostEqual(lag_two.loc["shipments", "pearson_anomaly"], -1.0)
+        self.assertAlmostEqual(lag_two.loc["volume_mt", "pearson_raw"], 1.0)
+        self.assertEqual(lag_two.loc["shipments", "weeks"], 3)
+        self.assertEqual(lag_two.loc["volume_mt", "weeks"], 4)
+        self.assertEqual(lag_two.loc["shipments", "active_weeks"], 5)
+        self.assertEqual(lag_two.loc["volume_mt", "active_weeks"], 6)
+        self.assertEqual(lag_two.loc["shipments", "scope"], "A")
+
+    def test_monthly_correlations_aggregate_and_deseasonalize_by_region(self):
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * 7 + ["B"] * 3,
+                "week_start": pd.to_datetime(
+                    [
+                        "2024-01-01",
+                        "2024-01-08",
+                        "2024-02-05",
+                        "2024-03-04",
+                        "2025-01-06",
+                        "2025-02-03",
+                        "2025-03-03",
+                        "2024-01-01",
+                        "2024-02-05",
+                        "2024-03-04",
+                    ]
+                ),
+                "rain_mm_day": [0, 2, 2, 4, 3, 6, 5, 1, 2, 3],
+                "shipments": [1, 2, 5, 4, 7, 6, 10, 3, 2, 1],
+                "volume_mt": [10, 20, 40, 80, 50, 100, 90, 10, 20, 30],
+            }
+        )
+
+        result = ca.calculate_monthly_correlations(panel)
+
+        self.assertEqual(set(result["scope"]), {"A", "B"})
+        self.assertEqual(set(result["metric"]), {"shipments", "volume_mt"})
+        indexed = result.set_index(["scope", "metric"])
+        monthly_rain = [1, 2, 4, 3, 6, 5]
+        monthly_shipments = [3, 5, 4, 7, 6, 10]
+        monthly_volume = [30, 40, 80, 50, 100, 90]
+        rain_anomaly = [-1, -2, -0.5, 1, 2, 0.5]
+        shipments_anomaly = [-2, -0.5, -3, 2, 0.5, 3]
+        volume_anomaly = [-10, -30, -5, 10, 30, 5]
+        self.assertAlmostEqual(
+            indexed.loc[("A", "shipments"), "pearson_raw"],
+            ca.correlation(monthly_rain, monthly_shipments),
+        )
+        self.assertAlmostEqual(
+            indexed.loc[("A", "volume_mt"), "spearman_raw"],
+            ca.correlation(monthly_rain, monthly_volume, rank=True),
+        )
+        self.assertAlmostEqual(
+            indexed.loc[("A", "shipments"), "pearson_anomaly"],
+            ca.correlation(rain_anomaly, shipments_anomaly),
+        )
+        self.assertAlmostEqual(
+            indexed.loc[("A", "volume_mt"), "pearson_anomaly"],
+            ca.correlation(rain_anomaly, volume_anomaly),
+        )
+        self.assertEqual(indexed.loc[("A", "shipments"), "months"], 6)
+        self.assertAlmostEqual(indexed.loc[("B", "shipments"), "pearson_raw"], -1.0)
+        self.assertAlmostEqual(indexed.loc[("B", "volume_mt"), "pearson_raw"], 1.0)
 
 
 if __name__ == "__main__":

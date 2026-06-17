@@ -91,3 +91,175 @@ def build_shipment_weekly_panel(shipments, regions, weeks):
         .reindex(index, fill_value=0)
         .reset_index()
     )
+
+
+def build_rain_weekly_panel(rain, weeks):
+    """Aggregate port rainfall into observed regional Monday weeks."""
+    _, week_index = _validated_panel_keys([], weeks)
+    out = rain.copy()
+    out["date"] = pd.to_datetime(
+        out["date"], errors="coerce", format="mixed"
+    ).dt.normalize()
+    parsed_precipitation = pd.to_numeric(
+        out["precipitation_mm"], errors="coerce"
+    )
+    invalid_precipitation = parsed_precipitation.isna() | parsed_precipitation.isin(
+        [float("inf"), float("-inf")]
+    )
+    if invalid_precipitation.any():
+        row_labels = ", ".join(
+            str(index) for index in out.index[invalid_precipitation]
+        )
+        raise ValueError(
+            "Invalid or missing precipitation_mm at rainfall rows: "
+            f"{row_labels}"
+        )
+    out["precipitation_mm"] = parsed_precipitation
+    out = out.dropna(
+        subset=["region_group", "port_name", "date", "precipitation_mm"]
+    )
+    out["week_start"] = monday_start(out["date"])
+    out = out[out["week_start"].isin(week_index)]
+
+    port_daily = (
+        out.groupby(
+            ["region_group", "date", "week_start", "port_name"],
+            as_index=False,
+        )
+        .agg(port_rain_mm=("precipitation_mm", "mean"))
+    )
+    regional_daily = (
+        port_daily.groupby(
+            ["region_group", "date", "week_start"], as_index=False
+        )
+        .agg(
+            daily_rain_mm=("port_rain_mm", "mean"),
+            port_count=("port_name", "nunique"),
+        )
+    )
+    return (
+        regional_daily.groupby(["region_group", "week_start"], as_index=False)
+        .agg(
+            rain_mm_day=("daily_rain_mm", "mean"),
+            rain_days=("date", "nunique"),
+            min_ports=("port_count", "min"),
+        )
+    )
+
+
+def add_weekly_anomalies(panel):
+    """Add region-specific ISO-week anomalies for rain and shipment metrics."""
+    out = panel.copy()
+    week_start = pd.to_datetime(out["week_start"], format="mixed")
+    out["iso_week"] = week_start.dt.isocalendar().week.astype(int)
+    for column in ("rain_mm_day", "shipments", "volume_mt"):
+        baseline = out.groupby(["region_group", "iso_week"])[column].transform(
+            "mean"
+        )
+        out[f"{column}_anomaly"] = out[column] - baseline
+    return out
+
+
+def correlation(left, right, rank=False):
+    """Return pairwise Pearson correlation, optionally after average ranking."""
+    pairs = _paired_values(left, right)
+    if (
+        len(pairs) < 3
+        or pairs["left"].nunique() < 2
+        or pairs["right"].nunique() < 2
+    ):
+        return float("nan")
+    if rank:
+        pairs = pairs.rank(method="average")
+    return float(pairs["left"].corr(pairs["right"]))
+
+
+def _paired_values(left, right):
+    return pd.DataFrame(
+        {
+            "left": pd.Series(left).reset_index(drop=True),
+            "right": pd.Series(right).reset_index(drop=True),
+        }
+    ).dropna()
+
+
+def _pair_count(left, right):
+    return int(_paired_values(left, right).shape[0])
+
+
+def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
+    """Calculate regional correlations where positive lags mean rain leads."""
+    rows = []
+    for scope, group in panel.groupby(scope_column, sort=False):
+        group = group.sort_values("week_start")
+        for metric in ("shipments", "volume_mt"):
+            active_weeks = int((group[metric] > 0).sum())
+            for lag in range(max_lag + 1):
+                future_metric = group[metric].shift(-lag)
+                future_anomaly = group[f"{metric}_anomaly"].shift(-lag)
+                rows.append(
+                    {
+                        "scope": scope,
+                        "metric": metric,
+                        "rain_leads_weeks": lag,
+                        "pearson_raw": correlation(
+                            group["rain_mm_day"], future_metric
+                        ),
+                        "spearman_raw": correlation(
+                            group["rain_mm_day"], future_metric, rank=True
+                        ),
+                        "pearson_anomaly": correlation(
+                            group["rain_mm_day_anomaly"], future_anomaly
+                        ),
+                        "weeks": _pair_count(
+                            group["rain_mm_day"], future_metric
+                        ),
+                        "active_weeks": active_weeks,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def calculate_monthly_correlations(panel):
+    """Calculate region-first raw and month-of-year adjusted correlations."""
+    monthly_source = panel.copy()
+    week_start = pd.to_datetime(monthly_source["week_start"], format="mixed")
+    monthly_source["month"] = week_start.dt.to_period("M").dt.to_timestamp()
+    monthly = (
+        monthly_source.groupby(["region_group", "month"], as_index=False)
+        .agg(
+            rain_mm_day=("rain_mm_day", "mean"),
+            shipments=("shipments", lambda values: values.sum(min_count=1)),
+            volume_mt=("volume_mt", lambda values: values.sum(min_count=1)),
+        )
+    )
+    monthly["month_of_year"] = monthly["month"].dt.month
+    for column in ("rain_mm_day", "shipments", "volume_mt"):
+        baseline = monthly.groupby(["region_group", "month_of_year"])[
+            column
+        ].transform("mean")
+        monthly[f"{column}_anomaly"] = monthly[column] - baseline
+
+    rows = []
+    for region, group in monthly.groupby("region_group", sort=False):
+        for metric in ("shipments", "volume_mt"):
+            rows.append(
+                {
+                    "scope": region,
+                    "metric": metric,
+                    "pearson_raw": correlation(
+                        group["rain_mm_day"], group[metric]
+                    ),
+                    "pearson_anomaly": correlation(
+                        group["rain_mm_day_anomaly"],
+                        group[f"{metric}_anomaly"],
+                    ),
+                    "spearman_raw": correlation(
+                        group["rain_mm_day"], group[metric], rank=True
+                    ),
+                    "months": _pair_count(
+                        group["rain_mm_day"], group[metric]
+                    ),
+                }
+            )
+    return pd.DataFrame(rows)
