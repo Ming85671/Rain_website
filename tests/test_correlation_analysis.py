@@ -43,17 +43,50 @@ class PortMappingTests(unittest.TestCase):
         self.assertIn("Unknown Z", message)
         self.assertNotIn("Known", message)
 
+    def test_unmapped_error_formats_null_and_mixed_type_ports(self):
+        shipments = pd.DataFrame({"load_port": [None, "Zulu", 17]})
+
+        with self.assertRaises(ValueError) as raised:
+            ca.map_shipment_regions(shipments, {})
+
+        self.assertEqual(
+            str(raised.exception),
+            "Unmapped shipment ports: 17, <missing>, Zulu",
+        )
+
 
 class WeeklyPanelTests(unittest.TestCase):
     def test_monday_start_normalizes_date_like_values(self):
-        values = pd.Series(["2025-01-06 14:30", "2025-01-12", "not-a-date"])
+        values = pd.Series(
+            ["2025-01-06 14:30", "2025-01-12", "not-a-date"],
+            index=["first", "second", "invalid"],
+        )
 
         result = ca.monday_start(values)
 
         expected = pd.Series(
-            pd.to_datetime(["2025-01-06", "2025-01-06", None])
+            pd.to_datetime(["2025-01-06", "2025-01-06", None]),
+            index=values.index,
         )
         assert_series_equal(result, expected)
+
+    def test_monday_start_accepts_lists(self):
+        result = ca.monday_start(["2025-01-07", "2025-01-13"])
+
+        self.assertEqual(
+            result.tolist(),
+            list(pd.to_datetime(["2025-01-06", "2025-01-13"])),
+        )
+
+    def test_monday_start_accepts_datetime_index(self):
+        result = ca.monday_start(
+            pd.DatetimeIndex(["2025-01-08 12:00", "2025-01-19"])
+        )
+
+        self.assertEqual(
+            result.tolist(),
+            list(pd.to_datetime(["2025-01-06", "2025-01-13"])),
+        )
 
     def test_weekly_panel_excludes_out_of_range_and_invalid_rows(self):
         shipments = pd.DataFrame(
@@ -75,7 +108,7 @@ class WeeklyPanelTests(unittest.TestCase):
                     "Region A",
                 ],
                 "vsl_name": ["One", "Two", "Earlier", "Bad date", "No region", None],
-                "voy_intake_mt": ["10", "invalid", "999", "30", "40", "50"],
+                "voy_intake_mt": ["10", "20", "999", "30", "40", "50"],
             }
         )
         weeks = pd.DatetimeIndex(["2025-01-06", "2025-01-13"])
@@ -83,7 +116,80 @@ class WeeklyPanelTests(unittest.TestCase):
         result = ca.build_shipment_weekly_panel(shipments, ["Region A"], weeks)
 
         self.assertEqual(result["shipments"].tolist(), [2, 0])
-        self.assertEqual(result["volume_mt"].tolist(), [10.0, 0.0])
+        self.assertEqual(result["volume_mt"].tolist(), [30.0, 0.0])
+
+    def test_weekly_panel_rejects_invalid_and_missing_volume_with_row_indices(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2025-01-07", "2025-01-08", "2025-01-09"],
+                "region_group": ["Region A"] * 3,
+                "vsl_name": ["One", "Two", "Three"],
+                "voy_intake_mt": [10, "invalid", None],
+            },
+            index=[3, 8, 13],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_shipment_weekly_panel(
+                shipments,
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-06"]),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Invalid or missing voy_intake_mt at shipment rows: 8, 13",
+        )
+
+    def test_weekly_panel_rejects_duplicate_regions(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate regions: Region A"):
+            ca.build_shipment_weekly_panel(
+                pd.DataFrame(),
+                ["Region A", "Region A"],
+                pd.DatetimeIndex(["2025-01-06"]),
+            )
+
+    def test_weekly_panel_rejects_non_monday_week(self):
+        with self.assertRaisesRegex(ValueError, "Mondays"):
+            ca.build_shipment_weekly_panel(
+                pd.DataFrame(),
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-07"]),
+            )
+
+    def test_weekly_panel_rejects_duplicate_normalized_weeks(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate weeks"):
+            ca.build_shipment_weekly_panel(
+                pd.DataFrame(),
+                ["Region A"],
+                ["2025-01-06", "2025-01-06 12:00"],
+            )
+
+    def test_weekly_panel_rejects_timezone_aware_weeks(self):
+        with self.assertRaisesRegex(ValueError, "timezone-naive"):
+            ca.build_shipment_weekly_panel(
+                pd.DataFrame(),
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-06"], tz="Asia/Shanghai"),
+            )
+
+    def test_weekly_panel_normalizes_monday_times(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2025-01-07"],
+                "region_group": ["Region A"],
+                "vsl_name": ["One"],
+                "voy_intake_mt": [25.0],
+            }
+        )
+
+        result = ca.build_shipment_weekly_panel(
+            shipments,
+            ["Region A"],
+            ["2025-01-06 12:00"],
+        )
+
+        self.assertEqual(result.loc[0, "week_start"], pd.Timestamp("2025-01-06"))
 
     def test_weekly_panel_returns_all_region_week_pairs_with_zeros(self):
         shipments = pd.DataFrame(
