@@ -4,7 +4,7 @@
 
 **Goal:** Add a tested command-line analysis that independently measures rainfall correlation with Philippine nickel ore shipment count and shipment volume over 2021-2025.
 
-**Architecture:** Keep statistical transformations in a standalone `correlation_analysis.py` module that accepts dataframes and imports the existing `rain.PORTS` mapping as its location source of truth. The CLI loads the workbook and Open-Meteo data, builds complete regional weekly panels, calculates raw and de-seasonalized weekly correlations with 0-4 week lags, adds monthly and annual robustness views, and exports tidy CSV files. Streamlit rendering remains outside this implementation.
+**Architecture:** Keep statistical transformations in a standalone `correlation_analysis.py` module that accepts dataframes and imports the existing `rain.PORTS` mapping as its location source of truth. The CLI loads the workbook and Open-Meteo data, builds complete regional weekly panels, calculates raw and de-seasonalized weekly correlations with 0-4 week lags, adds a monthly robustness view, and exports tidy CSV files. Streamlit rendering remains outside this implementation.
 
 **Tech Stack:** Python 3, pandas, NumPy, unittest, existing Open-Meteo loader in `rain.py`.
 
@@ -209,7 +209,7 @@ git add correlation_analysis.py tests/test_correlation_analysis.py
 git commit -m "feat: build weekly rainfall and anomaly panels"
 ```
 
-### Task 3: Independent metrics, lags, and robustness angles
+### Task 3: Independent metrics, lags, and monthly robustness
 
 **Files:**
 - Modify: `correlation_analysis.py`
@@ -245,7 +245,7 @@ Run: `python3 -m unittest tests.test_correlation_analysis.CorrelationTests -v`
 
 Expected: FAIL with missing `calculate_lag_correlations`.
 
-- [ ] **Step 3: Implement Pearson, rank correlation, lags, monthly, and annual summaries**
+- [ ] **Step 3: Implement Pearson, rank correlation, lags, and monthly summaries**
 
 ```python
 def correlation(left, right, rank=False):
@@ -308,20 +308,6 @@ def calculate_monthly_correlations(panel):
                     group["rain_mm_day_anomaly"], group[f"{metric}_anomaly"]
                 ),
             })
-    return pd.DataFrame(rows)
-
-
-def calculate_annual_stability(panel):
-    rows = []
-    for region, group in panel.groupby("region_group", sort=False):
-        for year, year_group in group.groupby(group["week_start"].dt.year):
-            for metric in ["shipments", "volume_mt"]:
-                rows.append({
-                    "scope": region,
-                    "year": int(year),
-                    "metric": metric,
-                    "pearson_raw": correlation(year_group["rain_mm_day"], year_group[metric]),
-                })
     return pd.DataFrame(rows)
 ```
 
@@ -453,7 +439,6 @@ class ExportTests(unittest.TestCase):
         tables = {
             "weekly_lags": pd.DataFrame({"scope": ["A"]}),
             "monthly": pd.DataFrame({"scope": ["A"]}),
-            "annual_stability": pd.DataFrame({"scope": ["A"]}),
             "coverage": pd.DataFrame({"region_group": ["A"]}),
         }
         with TemporaryDirectory() as directory:
@@ -463,7 +448,6 @@ class ExportTests(unittest.TestCase):
                 {
                     "weekly_lag_correlations.csv",
                     "monthly_correlations.csv",
-                    "annual_stability.csv",
                     "coverage.csv",
                 },
             )
@@ -483,7 +467,6 @@ def export_results(tables, output_dir):
     filenames = {
         "weekly_lags": "weekly_lag_correlations.csv",
         "monthly": "monthly_correlations.csv",
-        "annual_stability": "annual_stability.csv",
         "coverage": "coverage.csv",
     }
     for key, filename in filenames.items():
@@ -553,7 +536,6 @@ def main():
     export_results({
         "weekly_lags": weekly_lags,
         "monthly": calculate_monthly_correlations(panel),
-        "annual_stability": calculate_annual_stability(panel),
         "coverage": coverage,
     }, args.output_dir)
     strongest = weekly_lags.loc[
@@ -590,7 +572,7 @@ python3 correlation_analysis.py \
   --end-year 2025 \
   --output-dir correlation_output
 
-The output separately compares rainfall with shipment count and rainfall with shipment volume. Regional de-seasonalized weekly lag correlations are the primary interpretation; raw, monthly, annual, and national fixed-weight tables are robustness views. Correlation does not establish causation.
+The output separately compares rainfall with shipment count and rainfall with shipment volume. Regional de-seasonalized weekly lag correlations are the primary interpretation; raw, monthly, Spearman, and national fixed-weight tables are robustness views. Correlation does not establish causation.
 ```
 
 - [ ] **Step 5: Run the full test suite**
@@ -653,4 +635,4 @@ Confirm that positive `rain_leads_weeks` means rainfall occurs first, that shipm
 
 - [ ] **Step 4: Report results with interpretation boundaries**
 
-Report regional raw, regional anomaly, national weighted, monthly, annual-stability, and lag findings. Explicitly distinguish seasonal association from de-seasonalized association and do not describe correlation as causation.
+Report regional raw, regional anomaly, national weighted, monthly, Spearman, and lag findings. Explicitly distinguish seasonal association from de-seasonalized association and do not describe correlation as causation.
