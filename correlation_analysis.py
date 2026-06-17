@@ -188,15 +188,24 @@ def _pair_count(left, right):
 
 
 def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
-    """Calculate regional correlations where positive lags mean rain leads."""
+    """Calculate correlations where rain leads by exact calendar weeks.
+
+    ``active_weeks`` counts positive observations for each metric across the
+    full scope and therefore does not vary by lag.
+    """
     rows = []
     for scope, group in panel.groupby(scope_column, sort=False):
+        group = group.copy()
+        group["week_start"] = pd.to_datetime(group["week_start"], format="mixed")
         group = group.sort_values("week_start")
         for metric in ("shipments", "volume_mt"):
             active_weeks = int((group[metric] > 0).sum())
+            metric_by_week = group.set_index("week_start")[metric]
+            anomaly_by_week = group.set_index("week_start")[f"{metric}_anomaly"]
             for lag in range(max_lag + 1):
-                future_metric = group[metric].shift(-lag)
-                future_anomaly = group[f"{metric}_anomaly"].shift(-lag)
+                future_weeks = group["week_start"] + pd.Timedelta(weeks=lag)
+                future_metric = metric_by_week.reindex(future_weeks)
+                future_anomaly = anomaly_by_week.reindex(future_weeks)
                 rows.append(
                     {
                         "scope": scope,

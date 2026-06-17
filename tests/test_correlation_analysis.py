@@ -370,6 +370,39 @@ class CorrelationTests(unittest.TestCase):
         self.assertEqual(lag_two.loc["volume_mt", "active_weeks"], 6)
         self.assertEqual(lag_two.loc["shipments", "scope"], "A")
 
+    def test_lag_correlations_require_exact_future_calendar_week(self):
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * 5,
+                "week_start": pd.to_datetime(
+                    [
+                        "2025-01-06",
+                        "2025-01-20",
+                        "2025-01-27",
+                        "2025-02-03",
+                        "2025-02-10",
+                    ]
+                ),
+                "rain_mm_day": [100, 1, 2, 3, 4],
+                "rain_mm_day_anomaly": [100, 1, 2, 3, 4],
+                "shipments": [5, 999, 10, 20, 30],
+                "shipments_anomaly": [5, 999, 10, 20, 30],
+                "volume_mt": [0, 777, 100, 200, 300],
+                "volume_mt_anomaly": [0, 777, 100, 200, 300],
+            }
+        )
+
+        result = ca.calculate_lag_correlations(panel, max_lag=1)
+
+        lag_one = result[result["rain_leads_weeks"] == 1].set_index("metric")
+        self.assertEqual(lag_one.loc["shipments", "weeks"], 3)
+        self.assertEqual(lag_one.loc["volume_mt", "weeks"], 3)
+        self.assertAlmostEqual(lag_one.loc["shipments", "pearson_raw"], 1.0)
+        self.assertAlmostEqual(lag_one.loc["shipments", "pearson_anomaly"], 1.0)
+        self.assertAlmostEqual(lag_one.loc["volume_mt", "spearman_raw"], 1.0)
+        self.assertEqual(lag_one.loc["shipments", "active_weeks"], 5)
+        self.assertEqual(lag_one.loc["volume_mt", "active_weeks"], 4)
+
     def test_monthly_correlations_aggregate_and_deseasonalize_by_region(self):
         panel = pd.DataFrame(
             {
