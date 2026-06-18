@@ -1113,7 +1113,13 @@ def build_lag_profile_chart(
     fig.update_xaxes(title="Rain leads shipments (weeks)", dtick=1)
     fig.update_yaxes(title="Correlation coefficient", range=[-0.6, 0.3], tickformat=".2f")
     fig.add_hline(y=0, line_width=1, line_color="#94A3B8")
-    return _style_correlation_chart(fig, 420)
+    fig = _style_correlation_chart(fig, 480)
+    fig.update_layout(
+        margin=dict(l=42, r=24, t=130, b=42),
+        title=dict(y=0.98, yanchor="top"),
+        legend=dict(orientation="h", yanchor="top", y=1.27, x=0),
+    )
+    return fig
 
 
 def build_correlation_heatmap(

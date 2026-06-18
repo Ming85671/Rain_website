@@ -76,6 +76,18 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(list(figure.data[0].x), [0, 1, 2, 3, 4])
         self.assertEqual(list(figure.data[0].y), [0.02, -0.05, -0.25, -0.05, 0.05])
 
+    def test_lag_profile_reserves_separate_space_for_title_and_wrapped_legend(self):
+        figure = rain.build_lag_profile_chart(
+            self.weekly,
+            scope="Surigao-Dinagat-Caraga",
+            metric="shipments",
+        )
+
+        self.assertGreaterEqual(figure.layout.margin.t, 120)
+        self.assertEqual(figure.layout.legend.yanchor, "top")
+        self.assertGreaterEqual(figure.layout.legend.y, 1.2)
+        self.assertEqual(figure.layout.title.yanchor, "top")
+
     def test_heatmap_uses_region_order_and_selected_coefficient(self):
         figure = rain.build_correlation_heatmap(
             self.weekly,
