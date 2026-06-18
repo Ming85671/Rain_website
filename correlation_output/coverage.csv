@@ -1,0 +1,7 @@
+region_group,weeks,expected_weeks,min_rain_days,expected_ports,min_ports
+Eastern Samar,260,260,7,2,2
+Other-Check,260,260,7,5,5
+Palawan,260,260,7,4,4
+Surigao-Dinagat-Caraga,260,260,7,13,13
+Tawi-Tawi,260,260,7,4,4
+Zambales-Luzon,260,260,7,2,2

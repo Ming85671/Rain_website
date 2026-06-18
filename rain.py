@@ -4,12 +4,14 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
+from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse, urlunparse
 
 import certifi
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 import urllib3
@@ -105,6 +107,10 @@ YEAR_COLOR_SEQUENCE = [
 TIMEZONE = "Asia/Manila"
 FORECAST_CACHE_VERSION = "2026-06-16-batch-fallback"
 HISTORICAL_CACHE_VERSION = "2026-06-16-batch-fallback"
+CORRELATION_DATA_DIR = Path(__file__).with_name("correlation_output")
+CORRELATION_BLUE = "#0B5FFF"
+CORRELATION_TEAL = "#4B9AA6"
+CORRELATION_RED = "#C96A63"
 
 
 # ============================================================
@@ -995,13 +1001,301 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
 
 
 # ============================================================
+# Rainfall-shipment correlation page
+# ============================================================
+
+@st.cache_data(show_spinner=False)
+def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
+    """Load the verified aggregate outputs committed for Streamlit Cloud."""
+    filenames = [
+        "weekly_lag_correlations.csv",
+        "monthly_correlations.csv",
+        "coverage.csv",
+        "regional_weights.csv",
+    ]
+    missing = [name for name in filenames if not (data_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing correlation output files: " + ", ".join(missing)
+        )
+
+    tables = [pd.read_csv(data_dir / name) for name in filenames]
+    weekly, monthly, coverage, weights = tables
+    for frame in [weekly, monthly]:
+        frame["analysis_start"] = frame["analysis_start"].astype(str)
+        frame["analysis_end"] = frame["analysis_end"].astype(str)
+    return weekly, monthly, coverage, weights
+
+
+def correlation_kpis(
+    weekly: pd.DataFrame,
+    scope: str,
+    metric: str,
+    coefficient: str,
+) -> Dict[str, Any]:
+    """Return same-week and strongest negative lag values for one view."""
+    selected = weekly[
+        (weekly["scope"] == scope) & (weekly["metric"] == metric)
+    ].sort_values("rain_leads_weeks")
+    if selected.empty:
+        raise ValueError(f"No correlation data for {scope} / {metric}")
+
+    same_week = selected[selected["rain_leads_weeks"] == 0]
+    if same_week.empty:
+        raise ValueError(f"No same-week correlation for {scope} / {metric}")
+
+    negative = selected[
+        pd.to_numeric(selected[coefficient], errors="coerce").lt(0)
+    ]
+    if negative.empty:
+        strongest_lag = None
+        strongest_value = None
+    else:
+        strongest = negative.loc[negative[coefficient].idxmin()]
+        strongest_lag = int(strongest["rain_leads_weeks"])
+        strongest_value = float(strongest[coefficient])
+
+    row = same_week.iloc[0]
+    return {
+        "same_week": float(row[coefficient]),
+        "strongest_lag": strongest_lag,
+        "strongest_value": strongest_value,
+        "weeks": int(row["weeks"]),
+        "active_weeks": int(row["active_weeks"]),
+        "analysis_start": str(row["analysis_start"]),
+        "analysis_end": str(row["analysis_end"]),
+    }
+
+
+def _style_correlation_chart(fig: go.Figure, height: int) -> go.Figure:
+    fig.update_layout(
+        height=height,
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(family="Helvetica Neue, Helvetica, Arial, sans-serif", color="#111827"),
+        margin=dict(l=42, r=24, t=62, b=42),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        hoverlabel=dict(bgcolor="#FFFFFF", bordercolor="#D9DEE7"),
+    )
+    fig.update_xaxes(showgrid=False, linecolor="#D9DEE7", zeroline=False)
+    fig.update_yaxes(gridcolor="#E9EDF4", linecolor="#D9DEE7", zeroline=True)
+    return fig
+
+
+def build_lag_profile_chart(
+    weekly: pd.DataFrame,
+    scope: str,
+    metric: str,
+) -> go.Figure:
+    """Compare the three verified coefficients across exact calendar lags."""
+    selected = weekly[
+        (weekly["scope"] == scope) & (weekly["metric"] == metric)
+    ].sort_values("rain_leads_weeks")
+    series = [
+        ("pearson_anomaly", "De-seasonalized Pearson", CORRELATION_BLUE, "solid"),
+        ("pearson_raw", "Raw Pearson", "#64748B", "dot"),
+        ("spearman_raw", "Raw Spearman", CORRELATION_TEAL, "dash"),
+    ]
+    fig = go.Figure()
+    for column, label, color, dash in series:
+        fig.add_trace(
+            go.Scatter(
+                x=selected["rain_leads_weeks"],
+                y=selected[column],
+                mode="lines+markers",
+                name=label,
+                line=dict(color=color, width=3 if column == "pearson_anomaly" else 1.8, dash=dash),
+                marker=dict(size=7),
+                hovertemplate="Rain leads %{x}w<br>r = %{y:.3f}<extra>" + label + "</extra>",
+            )
+        )
+    fig.update_layout(title=f"Lag profile · {scope}")
+    fig.update_xaxes(title="Rain leads shipments (weeks)", dtick=1)
+    fig.update_yaxes(title="Correlation coefficient", range=[-0.6, 0.3], tickformat=".2f")
+    fig.add_hline(y=0, line_width=1, line_color="#94A3B8")
+    return _style_correlation_chart(fig, 420)
+
+
+def build_correlation_heatmap(
+    weekly: pd.DataFrame,
+    metric: str,
+    coefficient: str,
+    regions: List[str],
+) -> go.Figure:
+    """Build the signature region-by-lag correlation matrix."""
+    regional = weekly[
+        weekly["scope"].isin(regions) & (weekly["metric"] == metric)
+    ].copy()
+    matrix = regional.pivot(
+        index="scope", columns="rain_leads_weeks", values=coefficient
+    ).reindex(index=regions, columns=range(5))
+    text = matrix.map(lambda value: "—" if pd.isna(value) else f"{value:.3f}")
+    fig = go.Figure(
+        data=go.Heatmap(
+            x=[f"{lag}w" for lag in matrix.columns],
+            y=list(matrix.index),
+            z=matrix.to_numpy(),
+            text=text.to_numpy(),
+            texttemplate="%{text}",
+            textfont=dict(size=13),
+            colorscale=[
+                [0.0, "#B42318"],
+                [0.45, "#F6C7C3"],
+                [0.5, "#F8FAFC"],
+                [1.0, "#B9D8F2"],
+            ],
+            zmin=-0.5,
+            zmax=0.5,
+            colorbar=dict(title="r", thickness=12),
+            hovertemplate="%{y}<br>Rain leads %{x}<br>r = %{z:.3f}<extra></extra>",
+        )
+    )
+    fig.update_layout(title="Regional lag correlation")
+    fig.update_yaxes(autorange="reversed")
+    return _style_correlation_chart(fig, 470)
+
+
+def render_correlation_page() -> None:
+    weekly, monthly, coverage, _weights = load_correlation_outputs()
+
+    st.markdown(
+        """
+        <style>
+        .correlation-hero {border-top:5px solid #002FA7; border-bottom:1px solid #D9DEE7; padding:20px 4px 22px; margin-bottom:18px;}
+        .correlation-title {font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-size:3rem; line-height:1; font-weight:800; color:#111827; margin:0;}
+        .correlation-subtitle {font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; color:#5F6B7A; margin-top:10px; font-size:1rem;}
+        .correlation-card {background:#FFFFFF; border:1px solid #D9DEE7; border-radius:4px; padding:18px 20px; min-height:118px;}
+        .correlation-label {color:#5F6B7A; font-size:.78rem; text-transform:uppercase; letter-spacing:.02em;}
+        .correlation-value {color:#0B5FFF; font-size:2.15rem; font-weight:750; line-height:1.15; margin-top:9px; font-variant-numeric:tabular-nums;}
+        .correlation-note {color:#5F6B7A; font-size:.84rem; margin-top:6px;}
+        .correlation-callout {border-left:4px solid #0B5FFF; background:#F5F7FA; padding:12px 16px; color:#334155; margin:8px 0 20px;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    weeks = int(coverage["weeks"].min())
+    ports = int(coverage["expected_ports"].sum())
+    st.markdown(
+        f"""
+        <div class="correlation-hero">
+          <div class="correlation-title">Rainfall × Nickel Ore Shipments</div>
+          <div class="correlation-subtitle">2021–2025 · {weeks} complete weeks · {ports} ports · {len(coverage)} regions</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    scopes = ["Philippines weighted"] + REGION_ORDER
+    metric_labels = {"Shipment count": "shipments", "Shipment volume": "volume_mt"}
+    analysis_labels = {
+        "De-seasonalized Pearson": "pearson_anomaly",
+        "Raw Pearson": "pearson_raw",
+        "Raw Spearman": "spearman_raw",
+    }
+    filter_scope, filter_metric, filter_analysis = st.columns([1.35, 1, 1.2])
+    with filter_scope:
+        scope = st.selectbox("Region", scopes)
+    with filter_metric:
+        metric_label = st.selectbox("Metric", list(metric_labels))
+    with filter_analysis:
+        analysis_label = st.selectbox("Analysis", list(analysis_labels))
+    metric = metric_labels[metric_label]
+    coefficient = analysis_labels[analysis_label]
+    kpis = correlation_kpis(weekly, scope, metric, coefficient)
+
+    card_one, card_two, card_three = st.columns(3)
+    with card_one:
+        st.markdown(
+            f'<div class="correlation-card"><div class="correlation-label">Same-week correlation</div><div class="correlation-value">{kpis["same_week"]:+.3f}</div><div class="correlation-note">{analysis_label}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with card_two:
+        if kpis["strongest_lag"] is None:
+            lag_value = "No negative lag"
+            lag_note = "Across 0–4 weeks"
+        else:
+            lag_value = f'{kpis["strongest_lag"]} weeks · r = {kpis["strongest_value"]:+.3f}'
+            lag_note = "Strongest negative association"
+        st.markdown(
+            f'<div class="correlation-card"><div class="correlation-label">Strongest lag</div><div class="correlation-value">{lag_value}</div><div class="correlation-note">{lag_note}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with card_three:
+        st.markdown(
+            f'<div class="correlation-card"><div class="correlation-label">Coverage</div><div class="correlation-value">{kpis["weeks"]} weeks</div><div class="correlation-note">{kpis["active_weeks"]} active shipment weeks</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        '<div class="correlation-callout">Primary view removes normal week-of-year seasonality. Negative values indicate that higher rainfall is associated with lower shipments in the compared week.</div>',
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([1.05, 1.35])
+    with left:
+        st.plotly_chart(
+            build_lag_profile_chart(weekly, scope, metric),
+            use_container_width=True,
+        )
+    with right:
+        st.plotly_chart(
+            build_correlation_heatmap(weekly, metric, coefficient, REGION_ORDER),
+            use_container_width=True,
+        )
+
+    monthly_selected = monthly[
+        (monthly["metric"] == metric) & monthly["scope"].isin(scopes)
+    ].copy()
+    monthly_selected["scope"] = pd.Categorical(
+        monthly_selected["scope"], categories=scopes, ordered=True
+    )
+    monthly_selected = monthly_selected.sort_values("scope")
+    monthly_fig = px.bar(
+        monthly_selected,
+        x="scope",
+        y=coefficient,
+        color=coefficient,
+        color_continuous_scale=[CORRELATION_RED, "#F8FAFC", "#B9D8F2"],
+        color_continuous_midpoint=0,
+        text_auto=".3f",
+        title="Monthly robustness check",
+        labels={"scope": "Region", coefficient: "Correlation coefficient"},
+    )
+    monthly_fig.update_traces(textposition="outside", cliponaxis=False)
+    monthly_fig.update_layout(coloraxis_showscale=False)
+    st.plotly_chart(_style_correlation_chart(monthly_fig, 430), use_container_width=True)
+
+    with st.expander("Method and interpretation"):
+        st.markdown(
+            """
+            - Shipment count and shipment volume are each compared with rainfall; they are not correlated with one another here.
+            - Weekly results use complete Monday–Sunday weeks. Positive lags mean rainfall occurs before the compared shipment week.
+            - Regional results are primary because rainfall seasons differ across the Philippines.
+            - The national view uses fixed 2021–2025 regional shipment-share weights.
+            - Raw and monthly results describe seasonal association. De-seasonalized Pearson is the primary operational view.
+
+            **Correlation does not establish causation.**
+            """
+        )
+
+
+# ============================================================
 # Streamlit UI
 # ============================================================
 
 def main() -> None:
     today = date.today()
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Select page", ["Philippine rain"])
+    page = st.sidebar.radio(
+        "Select page",
+        ["Philippine rain", "Rainfall × shipments"],
+    )
+
+    if page == "Rainfall × shipments":
+        st.sidebar.caption("Verified aggregate analysis · 2021–2025")
+        render_correlation_page()
+        return
 
     st.sidebar.divider()
     st.sidebar.subheader("Historical settings")
