@@ -416,9 +416,10 @@ def calculate_monthly_correlations(panel):
     return pd.DataFrame(rows, columns=MONTHLY_CORRELATION_COLUMNS)
 
 
-def build_national_panel(regional_panel):
+def build_national_panel(regional_panel, weight_panel=None):
     """Build weekly national totals and fixed metric-specific rainfall weights."""
     panel = regional_panel.copy()
+    weight_source = panel if weight_panel is None else weight_panel.copy()
     panel["week_start"] = pd.to_datetime(panel["week_start"], format="mixed")
     duplicate = panel.duplicated(["region_group", "week_start"], keep=False)
     if duplicate.any():
@@ -443,14 +444,14 @@ def build_national_panel(regional_panel):
         .reset_index(drop=True)
     )
     for metric in ("shipments", "volume_mt"):
-        invalid_values = panel[metric].isna() | panel[metric].isin(
+        invalid_values = weight_source[metric].isna() | weight_source[metric].isin(
             [float("inf"), float("-inf")]
         )
         if invalid_values.any():
             labels = ", ".join(
                 sorted(
                     str(region)
-                    for region in panel.loc[
+                    for region in weight_source.loc[
                         invalid_values, "region_group"
                     ].unique()
                 )
@@ -458,7 +459,11 @@ def build_national_panel(regional_panel):
             raise ValueError(
                 f"Non-finite {metric} regional totals for weights: {labels}"
             )
-        totals = panel.groupby("region_group", sort=True)[metric].sum().reindex(regions)
+        totals = (
+            weight_source.groupby("region_group", sort=True)[metric]
+            .sum()
+            .reindex(regions)
+        )
         non_finite = totals.isna() | totals.isin([float("inf"), float("-inf")])
         if non_finite.any():
             labels = ", ".join(str(region) for region in totals.index[non_finite])
@@ -729,6 +734,67 @@ def merge_weekly_panels(shipment_weekly, rain_weekly):
     return merged
 
 
+def calculate_correlation_tables(
+    shipments,
+    rainfall,
+    regions,
+    ports,
+    weeks,
+    weight_baseline_end="2025-12-31",
+):
+    """Calculate all published tables from validated source dataframes."""
+    validate_region_configuration(regions, ports)
+    port_region_map = {
+        port_name: details["region_group"]
+        for port_name, details in ports.items()
+    }
+    mapped_shipments = map_shipment_regions(shipments, port_region_map)
+    shipment_weekly = build_shipment_weekly_panel(
+        mapped_shipments, regions, weeks
+    )
+    rain_weekly = build_rain_weekly_panel(rainfall, weeks)
+    coverage = validate_rain_coverage(
+        rain_weekly,
+        regions,
+        weeks,
+        expected_port_counts(ports),
+    )
+    regional_panel = add_weekly_anomalies(
+        merge_weekly_panels(shipment_weekly, rain_weekly)
+    )
+    baseline = regional_panel[
+        pd.to_datetime(regional_panel["week_start"])
+        <= pd.Timestamp(weight_baseline_end)
+    ]
+    if baseline.empty:
+        raise ValueError("National weight baseline contains no analysis weeks")
+
+    national_panel, regional_weights = build_national_panel(
+        regional_panel,
+        weight_panel=baseline,
+    )
+    weekly_lags = pd.concat(
+        [
+            calculate_lag_correlations(regional_panel),
+            calculate_national_lag_correlations(national_panel),
+        ],
+        ignore_index=True,
+    )
+    monthly = pd.concat(
+        [
+            calculate_monthly_correlations(regional_panel),
+            calculate_national_monthly_correlations(national_panel),
+        ],
+        ignore_index=True,
+    )
+    return {
+        "weekly_lags": weekly_lags,
+        "monthly": monthly,
+        "coverage": coverage,
+        "regional_weights": regional_weights,
+    }
+
+
 RESULT_FILENAMES = {
     "weekly_lags": "weekly_lag_correlations.csv",
     "monthly": "monthly_correlations.csv",
@@ -824,15 +890,8 @@ def main(argv=None, rain_module=None):
     if rain_module is None:
         rain_module = importlib.import_module("rain")
     regions = list(rain_module.REGION_ORDER)
-    validate_region_configuration(regions, rain_module.PORTS)
     weeks = complete_monday_weeks(args.start_year, args.end_year)
-    port_region_map = {
-        port_name: details["region_group"]
-        for port_name, details in rain_module.PORTS.items()
-    }
     shipments = pd.read_excel(args.shipments_file, sheet_name=args.sheet)
-    shipments = map_shipment_regions(shipments, port_region_map)
-    shipment_weekly = build_shipment_weekly_panel(shipments, regions, weeks)
 
     rainfall = load_rainfall_data(
         args.start_year,
@@ -841,39 +900,16 @@ def main(argv=None, rain_module=None):
         ports=rain_module.PORTS,
         loader=rain_module.load_historical_data_cached,
     )
-    rain_weekly = build_rain_weekly_panel(rainfall, weeks)
-    coverage = validate_rain_coverage(
-        rain_weekly,
-        regions,
-        weeks,
-        expected_port_counts(rain_module.PORTS),
+    tables = calculate_correlation_tables(
+        shipments,
+        rainfall,
+        regions=regions,
+        ports=rain_module.PORTS,
+        weeks=weeks,
     )
-    regional_panel = add_weekly_anomalies(
-        merge_weekly_panels(shipment_weekly, rain_weekly)
-    )
-
-    regional_lags = calculate_lag_correlations(regional_panel)
-    national_panel, regional_weights = build_national_panel(regional_panel)
-    weekly_lags = pd.concat(
-        [regional_lags, calculate_national_lag_correlations(national_panel)],
-        ignore_index=True,
-    )
-    monthly = pd.concat(
-        [
-            calculate_monthly_correlations(regional_panel),
-            calculate_national_monthly_correlations(national_panel),
-        ],
-        ignore_index=True,
-    )
-    tables = {
-        "weekly_lags": weekly_lags,
-        "monthly": monthly,
-        "coverage": coverage,
-        "regional_weights": regional_weights,
-    }
     paths = export_results(tables, args.output_dir)
 
-    print_correlation_summary(weekly_lags)
+    print_correlation_summary(tables["weekly_lags"])
     print(
         f"Coverage: {len(regions)} regions, {len(weeks)} complete weeks, "
         f"{len(rain_module.PORTS)} configured ports"

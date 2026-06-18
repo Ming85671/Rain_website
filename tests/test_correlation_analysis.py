@@ -816,6 +816,22 @@ class NationalAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(national.loc[0, "rain_shipments"], 19.0)
         self.assertAlmostEqual(national.loc[0, "rain_volume_mt"], 91.0)
 
+    def test_build_national_panel_uses_separate_weight_baseline(self):
+        panel = self._regional_panel()
+        changed = panel.copy()
+        changed.loc[changed["week_start"].eq(pd.Timestamp("2025-01-13")), "shipments"] = [99, 1]
+        baseline = panel[panel["week_start"].eq(pd.Timestamp("2025-01-06"))]
+
+        national, weights = ca.build_national_panel(
+            changed,
+            weight_panel=baseline,
+        )
+
+        indexed = weights.set_index("region_group")
+        self.assertAlmostEqual(indexed.loc["A", "shipments_weight"], 0.9)
+        self.assertAlmostEqual(indexed.loc["B", "shipments_weight"], 0.1)
+        self.assertEqual(national["shipments"].tolist(), [10, 100])
+
     def test_build_national_panel_rejects_invalid_common_panel(self):
         duplicate = pd.concat([self._regional_panel(), self._regional_panel().iloc[[0]]])
         with self.assertRaisesRegex(ValueError, "Duplicate region-week"):
@@ -970,6 +986,43 @@ class IntegrationTests(unittest.TestCase):
             ValueError, "No shipment records in a completed analysis week"
         ):
             ca.latest_analysis_week(shipments, today="2026-06-19")
+
+    def test_calculate_correlation_tables_orchestrates_dataframe_inputs(self):
+        weeks = pd.date_range("2025-01-06", periods=4, freq="W-MON")
+        shipments = pd.DataFrame(
+            {
+                "load_port": ["P1"] * 4,
+                "load_start_date": weeks,
+                "vsl_name": ["a", "b", "c", "d"],
+                "voy_intake_mt": [10, 20, 30, 40],
+            }
+        )
+        rainfall = pd.DataFrame(
+            [
+                {
+                    "date": day,
+                    "port_name": "P1",
+                    "region_group": "A",
+                    "precipitation_mm": float(day.day),
+                }
+                for week in weeks
+                for day in pd.date_range(week, periods=7)
+            ]
+        )
+
+        result = ca.calculate_correlation_tables(
+            shipments,
+            rainfall,
+            regions=["A"],
+            ports={"P1": {"region_group": "A"}},
+            weeks=weeks,
+        )
+
+        self.assertEqual(
+            set(result),
+            {"weekly_lags", "monthly", "coverage", "regional_weights"},
+        )
+        self.assertEqual(set(result["weekly_lags"]["analysis_end"]), {"2025-01-27"})
 
     def test_print_summary_has_national_headlines_and_every_regional_metric(self):
         weekly_lags = pd.DataFrame(
