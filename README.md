@@ -58,3 +58,24 @@ The command writes:
 - `monthly_correlations.csv`
 - `coverage.csv`
 - `regional_weights.csv`
+
+### Live dashboard refresh
+
+The Streamlit correlation page can refresh from the same MySQL `axs` table
+used by `Ming85671/data-analysis`. Copy that deployment's `[database]` block
+into the Rain app's Streamlit Cloud Secrets; never commit the credentials.
+
+The live calculation:
+
+- queries Philippine nickel-ore `load_start_date`, `load_port`, `vsl_name`, and
+  `voy_intake_mt` records;
+- combines them with Open-Meteo rainfall from 2021 onward;
+- includes only complete Monday-Sunday weeks through the latest completed week
+  represented by the shipment data;
+- refreshes the combined result on a six-hour cache;
+- keeps national rainfall weights fixed to the verified 2021-2025 baseline;
+- falls back to the committed correlation CSVs with a visible warning if the
+  database, rainfall source, port mapping, or validation is unavailable.
+
+The page subtitle always shows the actual analysis end date and whether the
+displayed result is `Live` or `Verified fallback`.

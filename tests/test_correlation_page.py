@@ -23,6 +23,12 @@ class CorrelationPageTests(unittest.TestCase):
             }
         )
 
+    def test_correlation_sidebar_caption_describes_live_complete_week_refresh(self):
+        self.assertEqual(
+            rain.CORRELATION_SIDEBAR_CAPTION,
+            "Live refresh · complete weeks only",
+        )
+
     def test_committed_correlation_outputs_cover_verified_five_year_panel(self):
         weekly, monthly, coverage, weights = rain.load_correlation_outputs()
 
@@ -95,6 +101,56 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(result.source, "live")
         self.assertIsNone(result.warning)
         pd.testing.assert_frame_equal(result.weekly, self.weekly)
+
+    def test_load_live_correlation_outputs_uses_latest_completed_data_week(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2026-06-14", "2026-06-18"],
+                "load_port": ["Surigao", "Surigao"],
+                "vsl_name": ["A", "B"],
+                "voy_intake_mt": [50000, 60000],
+            }
+        )
+        rainfall = pd.DataFrame()
+        tables = {
+            "weekly_lags": self.weekly,
+            "monthly": pd.DataFrame(),
+            "coverage": pd.DataFrame(),
+            "regional_weights": pd.DataFrame(),
+        }
+        rain.load_live_correlation_outputs.clear()
+
+        with (
+            patch.object(rain, "load_live_shipments", return_value=shipments),
+            patch.object(
+                rain,
+                "load_historical_data_cached",
+                return_value=rainfall,
+            ) as load_rain,
+            patch.object(
+                rain.correlation,
+                "_validate_rainfall_data",
+                return_value=rainfall,
+            ),
+            patch.object(
+                rain.correlation,
+                "calculate_correlation_tables",
+                return_value=tables,
+            ) as calculate,
+        ):
+            result = rain.load_live_correlation_outputs(
+                (("host", "db.example"),),
+                "2026-06-19",
+            )
+
+        self.assertIs(result[0], self.weekly)
+        self.assertEqual(load_rain.call_args.args[:2], ("2021-01-01", "2026-06-14"))
+        supplied_weeks = calculate.call_args.kwargs["weeks"]
+        self.assertEqual(supplied_weeks[-1], pd.Timestamp("2026-06-08"))
+        self.assertEqual(
+            calculate.call_args.kwargs["weight_baseline_end"],
+            "2025-12-31",
+        )
 
     def test_resolve_correlation_data_falls_back_without_database_config(self):
         result = rain.resolve_correlation_data(None, today_key="2026-06-19")

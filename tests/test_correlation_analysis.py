@@ -1024,6 +1024,81 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(set(result["weekly_lags"]["analysis_end"]), {"2025-01-27"})
 
+    def test_calculate_correlation_tables_reflects_shipment_and_volume_updates(self):
+        weeks = pd.date_range("2025-01-06", periods=20, freq="W-MON")
+        shipment_rows = []
+        for index, week in enumerate(weeks):
+            shipment_rows.append(
+                {
+                    "load_port": "P1",
+                    "load_start_date": week,
+                    "vsl_name": f"base-{index}",
+                    "voy_intake_mt": 100 + index,
+                }
+            )
+            if index % 2 == 0:
+                shipment_rows.append(
+                    {
+                        "load_port": "P1",
+                        "load_start_date": week,
+                        "vsl_name": f"extra-{index}",
+                        "voy_intake_mt": 50,
+                    }
+                )
+        shipments = pd.DataFrame(shipment_rows)
+        rainfall = pd.DataFrame(
+            [
+                {
+                    "date": day,
+                    "port_name": "P1",
+                    "region_group": "A",
+                    "precipitation_mm": float(index + 1),
+                }
+                for index, week in enumerate(weeks)
+                for day in pd.date_range(week, periods=7)
+            ]
+        )
+        inputs = {
+            "rainfall": rainfall,
+            "regions": ["A"],
+            "ports": {"P1": {"region_group": "A"}},
+            "weeks": weeks,
+        }
+
+        before = ca.calculate_correlation_tables(shipments, **inputs)
+        updated = pd.concat(
+            [
+                shipments,
+                pd.DataFrame(
+                    [
+                        {
+                            "load_port": "P1",
+                            "load_start_date": weeks[-1],
+                            "vsl_name": "new-live-record",
+                            "voy_intake_mt": 10000,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+        after = ca.calculate_correlation_tables(updated, **inputs)
+
+        before_same_week = before["weekly_lags"].query(
+            "scope == 'A' and rain_leads_weeks == 0"
+        ).set_index("metric")
+        after_same_week = after["weekly_lags"].query(
+            "scope == 'A' and rain_leads_weeks == 0"
+        ).set_index("metric")
+        self.assertNotEqual(
+            before_same_week.loc["shipments", "pearson_raw"],
+            after_same_week.loc["shipments", "pearson_raw"],
+        )
+        self.assertNotEqual(
+            before_same_week.loc["volume_mt", "pearson_raw"],
+            after_same_week.loc["volume_mt", "pearson_raw"],
+        )
+
     def test_print_summary_has_national_headlines_and_every_regional_metric(self):
         weekly_lags = pd.DataFrame(
             {

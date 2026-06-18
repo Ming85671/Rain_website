@@ -114,6 +114,7 @@ CORRELATION_DATA_DIR = Path(__file__).with_name("correlation_output")
 CORRELATION_BLUE = "#0B5FFF"
 CORRELATION_TEAL = "#4B9AA6"
 CORRELATION_RED = "#C96A63"
+CORRELATION_SIDEBAR_CAPTION = "Live refresh · complete weeks only"
 
 
 # ============================================================
@@ -1451,7 +1452,7 @@ def main() -> None:
     )
 
     if page == "Rainfall × shipments":
-        st.sidebar.caption("Verified aggregate analysis · 2021–2025")
+        st.sidebar.caption(CORRELATION_SIDEBAR_CAPTION)
         render_correlation_page()
         return
 
