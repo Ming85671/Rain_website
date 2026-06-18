@@ -220,6 +220,35 @@ def _pair_count(left, right):
     return int(_paired_values(left, right).shape[0])
 
 
+WEEKLY_CORRELATION_COLUMNS = [
+    "scope",
+    "metric",
+    "rain_leads_weeks",
+    "pearson_raw",
+    "spearman_raw",
+    "pearson_anomaly",
+    "weeks",
+    "active_weeks",
+    "analysis_start",
+    "analysis_end",
+]
+
+MONTHLY_CORRELATION_COLUMNS = [
+    "scope",
+    "metric",
+    "pearson_raw",
+    "pearson_anomaly",
+    "spearman_raw",
+    "months",
+    "analysis_start",
+    "analysis_end",
+]
+
+
+def _analysis_window(weeks):
+    return weeks.min().strftime("%Y-%m-%d"), weeks.max().strftime("%Y-%m-%d")
+
+
 def _validated_lag_panel(panel, scope_column):
     out = panel.copy()
     parsed_values = []
@@ -284,6 +313,7 @@ def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
         group = group.copy()
         group["week_start"] = pd.to_datetime(group["week_start"], format="mixed")
         group = group.sort_values("week_start")
+        analysis_start, analysis_end = _analysis_window(group["week_start"])
         for metric in ("shipments", "volume_mt"):
             active_weeks = int((group[metric] > 0).sum())
             metric_by_week = group.set_index("week_start")[metric]
@@ -310,15 +340,18 @@ def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
                             group["rain_mm_day"], future_metric
                         ),
                         "active_weeks": active_weeks,
+                        "analysis_start": analysis_start,
+                        "analysis_end": analysis_end,
                     }
                 )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=WEEKLY_CORRELATION_COLUMNS)
 
 
 def calculate_monthly_correlations(panel):
     """Calculate region-first raw and month-of-year adjusted correlations."""
     monthly_source = panel.copy()
     week_start = pd.to_datetime(monthly_source["week_start"], format="mixed")
+    monthly_source["week_start"] = week_start
     monthly_source["month"] = week_start.dt.to_period("M").dt.to_timestamp()
     monthly = (
         monthly_source.groupby(["region_group", "month"], as_index=False)
@@ -337,6 +370,10 @@ def calculate_monthly_correlations(panel):
 
     rows = []
     for region, group in monthly.groupby("region_group", sort=False):
+        source_weeks = monthly_source.loc[
+            monthly_source["region_group"].eq(region), "week_start"
+        ]
+        analysis_start, analysis_end = _analysis_window(source_weeks)
         for metric in ("shipments", "volume_mt"):
             rows.append(
                 {
@@ -355,9 +392,11 @@ def calculate_monthly_correlations(panel):
                     "months": _pair_count(
                         group["rain_mm_day"], group[metric]
                     ),
+                    "analysis_start": analysis_start,
+                    "analysis_end": analysis_end,
                 }
             )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=MONTHLY_CORRELATION_COLUMNS)
 
 
 def build_national_panel(regional_panel):

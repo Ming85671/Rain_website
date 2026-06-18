@@ -509,6 +509,16 @@ class CorrelationTests(unittest.TestCase):
         self.assertEqual(lag_two.loc["shipments", "active_weeks"], 5)
         self.assertEqual(lag_two.loc["volume_mt", "active_weeks"], 6)
         self.assertEqual(lag_two.loc["shipments", "scope"], "A")
+        self.assertEqual(
+            list(result.columns),
+            [
+                "scope", "metric", "rain_leads_weeks", "pearson_raw",
+                "spearman_raw", "pearson_anomaly", "weeks", "active_weeks",
+                "analysis_start", "analysis_end",
+            ],
+        )
+        self.assertEqual(set(result["analysis_start"]), {"2025-01-06"})
+        self.assertEqual(set(result["analysis_end"]), {"2025-02-10"})
 
     def test_lag_correlations_require_exact_future_calendar_week(self):
         panel = pd.DataFrame(
@@ -661,6 +671,59 @@ class CorrelationTests(unittest.TestCase):
         self.assertEqual(indexed.loc[("A", "shipments"), "months"], 6)
         self.assertAlmostEqual(indexed.loc[("B", "shipments"), "pearson_raw"], -1.0)
         self.assertAlmostEqual(indexed.loc[("B", "volume_mt"), "pearson_raw"], 1.0)
+        self.assertEqual(
+            list(result.columns),
+            [
+                "scope", "metric", "pearson_raw", "pearson_anomaly",
+                "spearman_raw", "months", "analysis_start", "analysis_end",
+            ],
+        )
+        self.assertEqual(
+            set(result.loc[result["scope"].eq("A"), "analysis_start"]),
+            {"2024-01-01"},
+        )
+        self.assertEqual(
+            set(result.loc[result["scope"].eq("A"), "analysis_end"]),
+            {"2025-03-03"},
+        )
+        self.assertEqual(
+            set(result.loc[result["scope"].eq("B"), "analysis_start"]),
+            {"2024-01-01"},
+        )
+        self.assertEqual(
+            set(result.loc[result["scope"].eq("B"), "analysis_end"]),
+            {"2024-03-04"},
+        )
+
+    def test_empty_correlation_tables_keep_provenance_schema(self):
+        panel = pd.DataFrame(
+            columns=[
+                "region_group", "week_start", "rain_mm_day",
+                "rain_mm_day_anomaly", "shipments", "shipments_anomaly",
+                "volume_mt", "volume_mt_anomaly",
+            ]
+        )
+
+        weekly = ca.calculate_lag_correlations(panel)
+        monthly = ca.calculate_monthly_correlations(panel)
+
+        self.assertTrue(weekly.empty)
+        self.assertEqual(
+            list(weekly.columns),
+            [
+                "scope", "metric", "rain_leads_weeks", "pearson_raw",
+                "spearman_raw", "pearson_anomaly", "weeks", "active_weeks",
+                "analysis_start", "analysis_end",
+            ],
+        )
+        self.assertTrue(monthly.empty)
+        self.assertEqual(
+            list(monthly.columns),
+            [
+                "scope", "metric", "pearson_raw", "pearson_anomaly",
+                "spearman_raw", "months", "analysis_start", "analysis_end",
+            ],
+        )
 
 
 class NationalAnalysisTests(unittest.TestCase):
@@ -773,9 +836,12 @@ class NationalAnalysisTests(unittest.TestCase):
             [
                 "scope", "metric", "rain_leads_weeks", "pearson_raw",
                 "spearman_raw", "pearson_anomaly", "weeks", "active_weeks",
+                "analysis_start", "analysis_end",
             ],
         )
         self.assertEqual(set(result["scope"]), {"Philippines weighted"})
+        self.assertEqual(set(result["analysis_start"]), {"2025-01-06"})
+        self.assertEqual(set(result["analysis_end"]), {"2025-02-17"})
         lag_one = result[result["rain_leads_weeks"] == 1].set_index("metric")
         self.assertEqual(lag_one.loc["shipments", "weeks"], 4)
         self.assertEqual(lag_one.loc["volume_mt", "weeks"], 4)
@@ -813,6 +879,8 @@ class NationalAnalysisTests(unittest.TestCase):
         indexed = national_result.set_index("metric")
         self.assertAlmostEqual(indexed.loc["shipments", "pearson_raw"], 1.0)
         self.assertAlmostEqual(indexed.loc["volume_mt", "pearson_raw"], -1.0)
+        self.assertEqual(set(national_result["analysis_start"]), {"2024-01-01"})
+        self.assertEqual(set(national_result["analysis_end"]), {"2025-03-03"})
 
 
 class IntegrationTests(unittest.TestCase):
@@ -1028,8 +1096,20 @@ class IntegrationTests(unittest.TestCase):
 
     def test_export_results_writes_exact_four_filenames(self):
         tables = {
-            "weekly_lags": pd.DataFrame({"scope": ["A"]}),
-            "monthly": pd.DataFrame({"scope": ["A"]}),
+            "weekly_lags": pd.DataFrame(
+                {
+                    "scope": ["A"],
+                    "analysis_start": ["2025-01-06"],
+                    "analysis_end": ["2025-02-10"],
+                }
+            ),
+            "monthly": pd.DataFrame(
+                {
+                    "scope": ["Philippines weighted"],
+                    "analysis_start": ["2024-01-01"],
+                    "analysis_end": ["2025-03-03"],
+                }
+            ),
             "coverage": pd.DataFrame({"region_group": ["A"]}),
             "regional_weights": pd.DataFrame({"region_group": ["A"]}),
         }
@@ -1046,6 +1126,9 @@ class IntegrationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(set(paths), set(tables))
+            for key in ("weekly_lags", "monthly"):
+                roundtrip = pd.read_csv(paths[key], dtype=str)
+                assert_frame_equal(roundtrip, tables[key])
 
     def test_cli_orchestrates_complete_analysis_without_network(self):
         weeks = pd.date_range("2025-01-06", periods=4, freq="W-MON")
