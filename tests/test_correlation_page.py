@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -33,6 +34,48 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(set(weekly["analysis_end"]), {"2025-12-22"})
         self.assertTrue(coverage["weeks"].eq(260).all())
         self.assertEqual(int(coverage["expected_ports"].sum()), 30)
+
+    def test_load_live_shipments_queries_required_mysql_columns(self):
+        expected = pd.DataFrame(
+            {
+                "load_start_date": ["2026-06-08"],
+                "load_port": ["Surigao"],
+                "vsl_name": ["Vessel A"],
+                "voy_intake_mt": [55000],
+            }
+        )
+        connection = Mock()
+
+        with (
+            patch.object(rain.mysql.connector, "connect", return_value=connection) as connect,
+            patch.object(rain.pd, "read_sql", return_value=expected) as read_sql,
+        ):
+            result = rain.load_live_shipments(
+                (("host", "db.example"), ("user", "reader"))
+            )
+
+        connect.assert_called_once_with(host="db.example", user="reader")
+        query = read_sql.call_args.args[0]
+        self.assertIn("load_start_date", query)
+        self.assertIn("load_port", query)
+        self.assertIn("vsl_name", query)
+        self.assertIn("voy_intake_mt", query)
+        self.assertIn("FROM axs", query)
+        connection.close.assert_called_once_with()
+        pd.testing.assert_frame_equal(result, expected)
+
+    def test_load_live_shipments_rejects_missing_database_columns(self):
+        connection = Mock()
+        incomplete = pd.DataFrame({"load_start_date": ["2026-06-08"]})
+
+        with (
+            patch.object(rain.mysql.connector, "connect", return_value=connection),
+            patch.object(rain.pd, "read_sql", return_value=incomplete),
+            self.assertRaisesRegex(ValueError, "missing columns"),
+        ):
+            rain.load_live_shipments((("host", "db.example"),))
+
+        connection.close.assert_called_once_with()
 
     def test_correlation_kpis_use_same_week_and_strongest_negative_lag(self):
         result = rain.correlation_kpis(

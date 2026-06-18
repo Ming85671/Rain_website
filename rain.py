@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from urllib.parse import urlparse, urlunparse
 
 import certifi
+import mysql.connector
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -1025,6 +1026,35 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         frame["analysis_start"] = frame["analysis_start"].astype(str)
         frame["analysis_end"] = frame["analysis_end"].astype(str)
     return weekly, monthly, coverage, weights
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def load_live_shipments(config_items) -> pd.DataFrame:
+    """Load the live Philippine nickel shipment inputs from MySQL."""
+    required = [
+        "load_start_date",
+        "load_port",
+        "vsl_name",
+        "voy_intake_mt",
+    ]
+    query = """
+        SELECT load_start_date, load_port, vsl_name, voy_intake_mt
+        FROM axs
+        WHERE load_country = 'Philippines'
+          AND commodity LIKE '%NICKEL%'
+        ORDER BY load_start_date
+    """
+    connection = mysql.connector.connect(**dict(config_items))
+    try:
+        frame = pd.read_sql(query, connection)
+        missing = [column for column in required if column not in frame.columns]
+        if missing:
+            raise ValueError(
+                "Live shipment data missing columns: " + ", ".join(missing)
+            )
+        return frame[required].copy()
+    finally:
+        connection.close()
 
 
 def correlation_kpis(

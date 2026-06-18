@@ -5,3 +5,4 @@ requests
 certifi
 urllib3
 plotly
+mysql-connector-python
