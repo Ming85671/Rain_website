@@ -1,14 +1,12 @@
 """Offline rainfall and shipment correlation analysis."""
 
 import argparse
+import importlib
 import math
 from numbers import Integral
 from pathlib import Path
 
 import pandas as pd
-
-import rain
-
 
 PORT_ALIASES = {
     "Hinituan & Talavera Islands": "Hinituan&Talavera Islands",
@@ -526,16 +524,25 @@ def _validate_rainfall_data(frame, ports, start_year, end_year):
     return out
 
 
-def load_rainfall_data(start_year, end_year, cache_path=None, ports=None):
+def load_rainfall_data(
+    start_year, end_year, cache_path=None, ports=None, loader=None
+):
     """Load validated daily rain from a supplied pickle or the existing loader."""
-    ports = rain.PORTS if ports is None else ports
+    if ports is None or (cache_path is None and loader is None):
+        rain_module = importlib.import_module("rain")
+        ports = rain_module.PORTS if ports is None else ports
+        loader = (
+            rain_module.load_historical_data_cached
+            if loader is None
+            else loader
+        )
     if cache_path is not None:
         cache_path = Path(cache_path)
         if not cache_path.is_file():
             raise ValueError(f"Rain cache does not exist: {cache_path}")
         frame = pd.read_pickle(cache_path)
     else:
-        frame = rain.load_historical_data_cached(
+        frame = loader(
             f"{start_year}-01-01", f"{end_year}-12-31"
         )
     return _validate_rainfall_data(frame, ports, start_year, end_year)
@@ -552,6 +559,20 @@ def expected_port_counts(ports):
         .size()
         .rename(columns={"size": "expected_ports"})
     )
+
+
+def validate_region_configuration(regions, ports):
+    """Require REGION_ORDER and PORTS to define the same region set."""
+    configured = set(regions)
+    port_regions = {details["region_group"] for details in ports.values()}
+    missing = sorted(str(region) for region in configured - port_regions)
+    extra = sorted(str(region) for region in port_regions - configured)
+    if missing or extra:
+        raise ValueError(
+            "Region configuration mismatch: "
+            f"missing from PORTS: {', '.join(missing) if missing else 'none'}; "
+            f"extra in PORTS: {', '.join(extra) if extra else 'none'}"
+        )
 
 
 def validate_rain_coverage(rain_weekly, regions, weeks, expected_ports):
@@ -653,6 +674,7 @@ def _strongest_anomaly_row(rows):
     finite = rows[
         rows["pearson_anomaly"].notna()
         & ~rows["pearson_anomaly"].isin([float("inf"), float("-inf")])
+        & rows["pearson_anomaly"].lt(0)
     ]
     if finite.empty:
         return None
@@ -662,7 +684,7 @@ def _strongest_anomaly_row(rows):
 def _lag_summary_text(rows, separator=", "):
     strongest = _strongest_anomaly_row(rows)
     if strongest is None:
-        return "no finite anomaly correlations"
+        return "no negative correlation"
     return (
         f"rain leads {int(strongest['rain_leads_weeks'])} week(s)"
         f"{separator}r={strongest['pearson_anomaly']:.3f}"
@@ -703,24 +725,34 @@ def print_correlation_summary(weekly_lags):
             )
 
 
-def main(argv=None):
+def main(argv=None, rain_module=None):
     args = parse_args(argv)
+    if rain_module is None:
+        rain_module = importlib.import_module("rain")
+    regions = list(rain_module.REGION_ORDER)
+    validate_region_configuration(regions, rain_module.PORTS)
     weeks = complete_monday_weeks(args.start_year, args.end_year)
-    regions = list(rain.REGION_ORDER)
     port_region_map = {
         port_name: details["region_group"]
-        for port_name, details in rain.PORTS.items()
+        for port_name, details in rain_module.PORTS.items()
     }
     shipments = pd.read_excel(args.shipments_file, sheet_name=args.sheet)
     shipments = map_shipment_regions(shipments, port_region_map)
     shipment_weekly = build_shipment_weekly_panel(shipments, regions, weeks)
 
     rainfall = load_rainfall_data(
-        args.start_year, args.end_year, args.rain_cache
+        args.start_year,
+        args.end_year,
+        args.rain_cache,
+        ports=rain_module.PORTS,
+        loader=rain_module.load_historical_data_cached,
     )
     rain_weekly = build_rain_weekly_panel(rainfall, weeks)
     coverage = validate_rain_coverage(
-        rain_weekly, regions, weeks, expected_port_counts(rain.PORTS)
+        rain_weekly,
+        regions,
+        weeks,
+        expected_port_counts(rain_module.PORTS),
     )
     regional_panel = add_weekly_anomalies(
         merge_weekly_panels(shipment_weekly, rain_weekly)
@@ -750,7 +782,7 @@ def main(argv=None):
     print_correlation_summary(weekly_lags)
     print(
         f"Coverage: {len(regions)} regions, {len(weeks)} complete weeks, "
-        f"{len(rain.PORTS)} configured ports"
+        f"{len(rain_module.PORTS)} configured ports"
     )
     print("Outputs: " + ", ".join(str(path) for path in paths.values()))
     return tables

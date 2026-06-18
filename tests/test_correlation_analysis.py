@@ -1,7 +1,10 @@
+import builtins
+import importlib.util
 import math
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -840,7 +843,7 @@ class IntegrationTests(unittest.TestCase):
             "(minimum anomaly Pearson):",
         )
         self.assertIn("shipments: rain leads 2 week(s), r=-0.600, n=258", lines)
-        self.assertIn("volume_mt: no finite anomaly correlations", lines)
+        self.assertIn("volume_mt: no negative correlation", lines)
         self.assertIn(
             "A | shipments | rain leads 1 week(s) | r=-0.400 | n=259",
             lines,
@@ -849,11 +852,82 @@ class IntegrationTests(unittest.TestCase):
             "A | volume_mt | rain leads 3 week(s) | r=-0.300 | n=257",
             lines,
         )
-        self.assertIn("B | shipments | no finite anomaly correlations", lines)
-        self.assertIn(
-            "B | volume_mt | rain leads 4 week(s) | r=0.200 | n=256",
-            lines,
+        self.assertIn("B | shipments | no negative correlation", lines)
+        self.assertIn("B | volume_mt | no negative correlation", lines)
+
+    def test_print_summary_rejects_positive_only_and_all_nan_anomalies(self):
+        weekly_lags = pd.DataFrame(
+            {
+                "scope": [
+                    "Philippines weighted", "Philippines weighted", "A", "A",
+                ],
+                "metric": ["shipments", "volume_mt", "shipments", "volume_mt"],
+                "rain_leads_weeks": [0, 1, 2, 3],
+                "pearson_anomaly": [0.0, float("nan"), 0.4, float("nan")],
+                "weeks": [260, 259, 258, 257],
+            }
         )
+
+        with patch("builtins.print") as printer:
+            ca.print_correlation_summary(weekly_lags)
+
+        lines = [str(call.args[0]) for call in printer.call_args_list]
+        self.assertIn("shipments: no negative correlation", lines)
+        self.assertIn("volume_mt: no negative correlation", lines)
+        self.assertIn("A | shipments | no negative correlation", lines)
+        self.assertIn("A | volume_mt | no negative correlation", lines)
+
+    def test_region_configuration_rejects_region_order_missing_from_ports(self):
+        ports = {"P1": {"region_group": "A"}}
+
+        with self.assertRaises(ValueError) as raised:
+            ca.validate_region_configuration(["A", "B"], ports)
+
+        self.assertEqual(
+            str(raised.exception),
+            "Region configuration mismatch: missing from PORTS: B; "
+            "extra in PORTS: none",
+        )
+
+    def test_region_configuration_rejects_ports_region_missing_from_order(self):
+        ports = {
+            "P1": {"region_group": "A"},
+            "P2": {"region_group": "C"},
+        }
+
+        with self.assertRaises(ValueError) as raised:
+            ca.validate_region_configuration(["A"], ports)
+
+        self.assertEqual(
+            str(raised.exception),
+            "Region configuration mismatch: missing from PORTS: none; "
+            "extra in PORTS: C",
+        )
+
+    def test_importing_module_does_not_import_rain(self):
+        original_import = builtins.__import__
+
+        def reject_rain_import(name, *args, **kwargs):
+            if name == "rain":
+                raise AssertionError("rain imported while loading correlation_analysis")
+            return original_import(name, *args, **kwargs)
+
+        spec = importlib.util.spec_from_file_location(
+            "correlation_analysis_without_rain", ca.__file__
+        )
+        module = importlib.util.module_from_spec(spec)
+        with patch("builtins.__import__", side_effect=reject_rain_import):
+            spec.loader.exec_module(module)
+
+    def test_help_does_not_import_rain(self):
+        with (
+            patch("correlation_analysis.importlib.import_module") as importer,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            ca.main(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        importer.assert_not_called()
 
     def test_complete_monday_weeks_stays_inside_calendar_years(self):
         weeks = ca.complete_monday_weeks(2021, 2025)
@@ -926,8 +1000,10 @@ class IntegrationTests(unittest.TestCase):
             loaded = ca.load_rainfall_data(2021, 2025, cache, ports=ports)
             assert_frame_equal(loaded, rain_frame)
 
-            with patch.object(ca.rain, "load_historical_data_cached", return_value=rain_frame) as loader:
-                loaded_live = ca.load_rainfall_data(2021, 2025, ports=ports)
+            loader = unittest.mock.Mock(return_value=rain_frame)
+            loaded_live = ca.load_rainfall_data(
+                2021, 2025, ports=ports, loader=loader
+            )
             loader.assert_called_once_with("2021-01-01", "2025-12-31")
             assert_frame_equal(loaded_live, rain_frame)
             self.assertEqual({path.name for path in Path(directory).iterdir()}, {"rain.pkl"})
@@ -1007,12 +1083,16 @@ class IntegrationTests(unittest.TestCase):
             captured["output_dir"] = output_dir
             return {key: output_dir / f"{key}.csv" for key in tables}
 
+        rain_loader = unittest.mock.Mock()
+        fake_rain = SimpleNamespace(
+            PORTS=fake_ports,
+            REGION_ORDER=["A", "B"],
+            load_historical_data_cached=rain_loader,
+        )
         with (
             patch.object(ca, "complete_monday_weeks", return_value=weeks),
             patch.object(ca.pd, "read_excel", return_value=shipments) as read_excel,
             patch.object(ca, "load_rainfall_data", return_value=rain_daily) as load_rain,
-            patch.object(ca.rain, "PORTS", fake_ports),
-            patch.object(ca.rain, "REGION_ORDER", ["A", "B"]),
             patch.object(ca, "export_results", side_effect=capture_export),
             patch("builtins.print") as printer,
         ):
@@ -1021,11 +1101,18 @@ class IntegrationTests(unittest.TestCase):
                     "--shipments-file", "shipments.xlsx",
                     "--rain-cache", "rain.pkl",
                     "--output-dir", "out",
-                ]
+                ],
+                rain_module=fake_rain,
             )
 
         read_excel.assert_called_once_with(Path("shipments.xlsx"), sheet_name="Raw_Cleaned")
-        load_rain.assert_called_once_with(2021, 2025, Path("rain.pkl"))
+        load_rain.assert_called_once_with(
+            2021,
+            2025,
+            Path("rain.pkl"),
+            ports=fake_ports,
+            loader=rain_loader,
+        )
         self.assertEqual(captured["output_dir"], Path("out"))
         self.assertEqual(
             set(captured) - {"output_dir"},
