@@ -77,6 +77,47 @@ class CorrelationPageTests(unittest.TestCase):
 
         connection.close.assert_called_once_with()
 
+    def test_resolve_correlation_data_returns_live_tables(self):
+        monthly = pd.DataFrame({"metric": ["shipments"]})
+        coverage = pd.DataFrame({"region_group": ["A"]})
+        weights = pd.DataFrame({"region_group": ["A"]})
+
+        with patch.object(
+            rain,
+            "load_live_correlation_outputs",
+            return_value=(self.weekly, monthly, coverage, weights),
+        ):
+            result = rain.resolve_correlation_data(
+                {"host": "db.example", "password": "secret"},
+                today_key="2026-06-19",
+            )
+
+        self.assertEqual(result.source, "live")
+        self.assertIsNone(result.warning)
+        pd.testing.assert_frame_equal(result.weekly, self.weekly)
+
+    def test_resolve_correlation_data_falls_back_without_database_config(self):
+        result = rain.resolve_correlation_data(None, today_key="2026-06-19")
+
+        self.assertEqual(result.source, "fallback")
+        self.assertIn("database", result.warning.lower())
+        self.assertEqual(set(result.weekly["analysis_end"]), {"2025-12-22"})
+
+    def test_resolve_correlation_data_sanitizes_live_failure(self):
+        with patch.object(
+            rain,
+            "load_live_correlation_outputs",
+            side_effect=RuntimeError("password=do-not-display"),
+        ):
+            result = rain.resolve_correlation_data(
+                {"host": "db.example", "password": "secret"},
+                today_key="2026-06-19",
+            )
+
+        self.assertEqual(result.source, "fallback")
+        self.assertNotIn("do-not-display", result.warning)
+        self.assertIn("verified snapshot", result.warning.lower())
+
     def test_correlation_kpis_use_same_week_and_strongest_negative_lag(self):
         result = rain.correlation_kpis(
             self.weekly,

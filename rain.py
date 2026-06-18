@@ -3,12 +3,14 @@ import ipaddress
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse, urlunparse
 
 import certifi
+import correlation_analysis as correlation
 import mysql.connector
 import pandas as pd
 import plotly.express as px
@@ -1005,6 +1007,16 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
 # Rainfall-shipment correlation page
 # ============================================================
 
+
+@dataclass(frozen=True)
+class CorrelationPageData:
+    weekly: pd.DataFrame
+    monthly: pd.DataFrame
+    coverage: pd.DataFrame
+    weights: pd.DataFrame
+    source: str
+    warning: str | None = None
+
 @st.cache_data(show_spinner=False)
 def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
     """Load the verified aggregate outputs committed for Streamlit Cloud."""
@@ -1055,6 +1067,87 @@ def load_live_shipments(config_items) -> pd.DataFrame:
         return frame[required].copy()
     finally:
         connection.close()
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def load_live_correlation_outputs(config_items, today_key: str):
+    """Calculate live correlation outputs through a conservative complete week."""
+    shipments = load_live_shipments(config_items)
+    final_week = correlation.latest_analysis_week(
+        shipments,
+        today=today_key,
+    )
+    weeks = correlation.complete_monday_weeks_through(2021, final_week)
+    final_day = final_week + pd.Timedelta(days=6)
+    rainfall = load_historical_data_cached(
+        "2021-01-01",
+        final_day.strftime("%Y-%m-%d"),
+        cache_version=f"live-correlation-{final_day:%Y-%m-%d}",
+    )
+    rainfall = correlation._validate_rainfall_data(
+        rainfall,
+        PORTS,
+        2021,
+        final_day.year,
+    )
+    tables = correlation.calculate_correlation_tables(
+        shipments,
+        rainfall,
+        regions=REGION_ORDER,
+        ports=PORTS,
+        weeks=weeks,
+        weight_baseline_end="2025-12-31",
+    )
+    return (
+        tables["weekly_lags"],
+        tables["monthly"],
+        tables["coverage"],
+        tables["regional_weights"],
+    )
+
+
+def resolve_correlation_data(
+    database_config,
+    today_key: str | None = None,
+) -> CorrelationPageData:
+    """Prefer validated live results and fall back to the committed snapshot."""
+    if today_key is None:
+        today_key = date.today().isoformat()
+
+    if database_config:
+        try:
+            config_items = tuple(sorted(dict(database_config).items()))
+            weekly, monthly, coverage, weights = load_live_correlation_outputs(
+                config_items,
+                today_key,
+            )
+            return CorrelationPageData(
+                weekly,
+                monthly,
+                coverage,
+                weights,
+                source="live",
+            )
+        except Exception:
+            warning = (
+                "Live correlation refresh failed validation. "
+                "Showing the verified snapshot instead."
+            )
+    else:
+        warning = (
+            "Live correlation database is not configured. "
+            "Showing the verified snapshot instead."
+        )
+
+    weekly, monthly, coverage, weights = load_correlation_outputs()
+    return CorrelationPageData(
+        weekly,
+        monthly,
+        coverage,
+        weights,
+        source="fallback",
+        warning=warning,
+    )
 
 
 def correlation_kpis(
