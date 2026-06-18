@@ -549,6 +549,44 @@ def complete_monday_weeks(start_year, end_year):
     return pd.date_range(first_monday, last_monday, freq="W-MON")
 
 
+def latest_complete_week(today=None):
+    """Return the Monday starting the latest fully completed week."""
+    current_day = (
+        pd.Timestamp.today().normalize()
+        if today is None
+        else pd.Timestamp(today).normalize()
+    )
+    return current_day - pd.Timedelta(days=current_day.weekday() + 7)
+
+
+def latest_analysis_week(shipments, today=None):
+    """Return the latest completed Monday with an eligible shipment record."""
+    latest_complete = latest_complete_week(today)
+    dates = pd.to_datetime(
+        shipments["load_start_date"], errors="coerce", format="mixed"
+    )
+    eligible = dates[dates <= latest_complete + pd.Timedelta(days=6)]
+    if eligible.empty:
+        raise ValueError("No shipment records in a completed analysis week")
+    latest_shipment = pd.Timestamp(eligible.max()).normalize()
+    shipment_week = latest_shipment - pd.Timedelta(
+        days=latest_shipment.weekday()
+    )
+    return min(latest_complete, shipment_week)
+
+
+def complete_monday_weeks_through(start_year, final_week):
+    """Return Monday week starts from a calendar year through final_week."""
+    first_day = pd.Timestamp(year=start_year, month=1, day=1)
+    first_monday = first_day + pd.Timedelta(days=(-first_day.weekday()) % 7)
+    final_week = pd.Timestamp(final_week).normalize()
+    if final_week.weekday() != 0:
+        raise ValueError("final_week must be a Monday")
+    if final_week < first_monday:
+        raise ValueError("final_week must not precede the analysis start")
+    return pd.date_range(first_monday, final_week, freq="W-MON")
+
+
 def _validate_rainfall_data(frame, ports, start_year, end_year):
     required = {"date", "port_name", "region_group", "precipitation_mm"}
     missing_columns = sorted(required - set(frame.columns))

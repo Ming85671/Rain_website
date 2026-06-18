@@ -943,6 +943,34 @@ class NationalAnalysisTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_latest_analysis_week_uses_latest_completed_shipment_week(self):
+        shipments = pd.DataFrame(
+            {"load_start_date": ["2026-06-10", "2026-06-14"]}
+        )
+
+        result = ca.latest_analysis_week(shipments, today="2026-06-19")
+
+        self.assertEqual(result, pd.Timestamp("2026-06-08"))
+
+    def test_latest_analysis_week_ignores_current_and_future_records(self):
+        shipments = pd.DataFrame(
+            {"load_start_date": ["2026-06-14", "2026-06-18", "2026-07-01"]}
+        )
+
+        result = ca.latest_analysis_week(shipments, today="2026-06-19")
+
+        self.assertEqual(result, pd.Timestamp("2026-06-08"))
+
+    def test_latest_analysis_week_rejects_missing_completed_records(self):
+        shipments = pd.DataFrame(
+            {"load_start_date": ["bad-date", "2026-06-18", "2026-07-01"]}
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "No shipment records in a completed analysis week"
+        ):
+            ca.latest_analysis_week(shipments, today="2026-06-19")
+
     def test_print_summary_has_national_headlines_and_every_regional_metric(self):
         weekly_lags = pd.DataFrame(
             {
