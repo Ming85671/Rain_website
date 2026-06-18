@@ -142,6 +142,29 @@ class WeeklyPanelTests(unittest.TestCase):
             "Invalid or missing voy_intake_mt at shipment rows: 8, 13",
         )
 
+    def test_weekly_panel_rejects_infinite_volume_with_row_indices(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2025-01-07", "2025-01-08"],
+                "region_group": ["Region A", "Region A"],
+                "vsl_name": ["One", "Two"],
+                "voy_intake_mt": [float("inf"), float("-inf")],
+            },
+            index=[5, 12],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_shipment_weekly_panel(
+                shipments,
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-06"]),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Invalid or missing voy_intake_mt at shipment rows: 5, 12",
+        )
+
     def test_weekly_panel_rejects_duplicate_regions(self):
         with self.assertRaisesRegex(ValueError, "Duplicate regions: Region A"):
             ca.build_shipment_weekly_panel(
@@ -253,17 +276,24 @@ class RainfallPanelTests(unittest.TestCase):
     def test_build_rain_weekly_panel_rejects_bad_precipitation_with_row_indices(self):
         rain = pd.DataFrame(
             {
-                "region_group": ["A", "A", "A", "A"],
-                "port_name": ["P1", "P2", "P3", "P4"],
+                "region_group": ["A", "A", "A", "A", "A"],
+                "port_name": ["P1", "P2", "P3", "P4", "P5"],
                 "date": [
                     "2025-01-06",
                     "bad-date",
                     "2025-01-07",
                     "2025-01-08",
+                    "2025-01-09",
                 ],
-                "precipitation_mm": [1.0, "trace", None, float("inf")],
+                "precipitation_mm": [
+                    1.0,
+                    "trace",
+                    None,
+                    float("inf"),
+                    float("-inf"),
+                ],
             },
-            index=[4, 9, 15, 22],
+            index=[4, 9, 15, 22, 27],
         )
 
         with self.assertRaises(ValueError) as raised:
@@ -271,27 +301,84 @@ class RainfallPanelTests(unittest.TestCase):
 
         self.assertEqual(
             str(raised.exception),
-            "Invalid or missing precipitation_mm at rainfall rows: 9, 15, 22",
+            "Invalid or missing precipitation_mm at rainfall rows: 9, 15, 22, 27",
         )
 
-    def test_build_rain_weekly_panel_drops_bad_dates_and_omits_missing_weeks(self):
+    def test_build_rain_weekly_panel_rejects_bad_and_missing_dates_with_row_indices(self):
         rain = pd.DataFrame(
             {
-                "region_group": ["A", "A", "B"],
-                "port_name": ["P1", "P1", "P2"],
-                "date": ["not-a-date", "2025-01-07", "2025-01-20"],
-                "precipitation_mm": [100.0, 3.0, 9.0],
-            }
+                "region_group": ["A", "A", "A"],
+                "port_name": ["P1", "P1", "P1"],
+                "date": ["not-a-date", None, "2025-01-07"],
+                "precipitation_mm": [100.0, 2.0, 3.0],
+            },
+            index=[2, 7, 11],
         )
 
-        result = ca.build_rain_weekly_panel(
-            rain,
-            pd.to_datetime(["2025-01-06", "2025-01-13"]),
+        with self.assertRaises(ValueError) as raised:
+            ca.build_rain_weekly_panel(rain, ["2025-01-06"])
+
+        self.assertEqual(
+            str(raised.exception),
+            "Invalid or missing date at rainfall rows: 2, 7",
         )
 
-        self.assertEqual(result["region_group"].tolist(), ["A"])
-        self.assertEqual(result["week_start"].tolist(), [pd.Timestamp("2025-01-06")])
-        self.assertEqual(result["rain_mm_day"].tolist(), [3.0])
+    def test_build_rain_weekly_panel_rejects_missing_regions_with_row_indices(self):
+        rain = pd.DataFrame(
+            {
+                "region_group": [None, "A"],
+                "port_name": ["P1", "P2"],
+                "date": ["2025-01-06", "2025-01-07"],
+                "precipitation_mm": [1.0, 2.0],
+            },
+            index=[4, 9],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_rain_weekly_panel(rain, ["2025-01-06"])
+
+        self.assertEqual(
+            str(raised.exception),
+            "Missing region_group at rainfall rows: 4",
+        )
+
+    def test_build_rain_weekly_panel_rejects_missing_ports_with_row_indices(self):
+        rain = pd.DataFrame(
+            {
+                "region_group": ["A", "A"],
+                "port_name": [None, "P2"],
+                "date": ["2025-01-06", "2025-01-07"],
+                "precipitation_mm": [1.0, 2.0],
+            },
+            index=[6, 10],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_rain_weekly_panel(rain, ["2025-01-06"])
+
+        self.assertEqual(
+            str(raised.exception),
+            "Missing port_name at rainfall rows: 6",
+        )
+
+    def test_build_rain_weekly_panel_rejects_negative_precipitation_with_row_indices(self):
+        rain = pd.DataFrame(
+            {
+                "region_group": ["A", "A", "A"],
+                "port_name": ["P1", "P2", "P3"],
+                "date": ["2025-01-06", "2025-01-07", "2025-01-08"],
+                "precipitation_mm": [1.0, -0.1, -5.0],
+            },
+            index=[3, 8, 14],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_rain_weekly_panel(rain, ["2025-01-06"])
+
+        self.assertEqual(
+            str(raised.exception),
+            "Negative precipitation_mm at rainfall rows: 8, 14",
+        )
 
     def test_add_weekly_anomalies_centers_each_metric_by_region_and_iso_week(self):
         panel = pd.DataFrame(
@@ -321,10 +408,34 @@ class RainfallPanelTests(unittest.TestCase):
 
 
 class CorrelationTests(unittest.TestCase):
+    @staticmethod
+    def _lag_panel(week_starts, scopes=None, index=None):
+        size = len(week_starts)
+        return pd.DataFrame(
+            {
+                "region_group": scopes or ["A"] * size,
+                "week_start": week_starts,
+                "rain_mm_day": list(range(1, size + 1)),
+                "rain_mm_day_anomaly": list(range(1, size + 1)),
+                "shipments": list(range(1, size + 1)),
+                "shipments_anomaly": list(range(1, size + 1)),
+                "volume_mt": list(range(10, 10 * size + 1, 10)),
+                "volume_mt_anomaly": list(range(10, 10 * size + 1, 10)),
+            },
+            index=index,
+        )
+
     def test_correlation_drops_missing_pairs_before_pearson(self):
         result = ca.correlation([1.0, 2.0, None, 4.0], [2.0, 4.0, 100.0, 8.0])
 
         self.assertAlmostEqual(result, 1.0)
+
+    def test_correlation_and_pair_count_exclude_non_finite_pairs(self):
+        left = [1.0, 2.0, float("inf"), 4.0, 5.0]
+        right = [2.0, 4.0, 6.0, 8.0, float("-inf")]
+
+        self.assertAlmostEqual(ca.correlation(left, right), 1.0)
+        self.assertEqual(ca._pair_count(left, right), 3)
 
     def test_correlation_pairs_series_by_position_not_index_label(self):
         left = pd.Series([1.0, 2.0, 3.0], index=[10, 11, 12])
@@ -402,6 +513,70 @@ class CorrelationTests(unittest.TestCase):
         self.assertAlmostEqual(lag_one.loc["volume_mt", "spearman_raw"], 1.0)
         self.assertEqual(lag_one.loc["shipments", "active_weeks"], 5)
         self.assertEqual(lag_one.loc["volume_mt", "active_weeks"], 4)
+
+    def test_lag_correlations_reject_invalid_max_lag_values(self):
+        panel = self._lag_panel(["2025-01-06"])
+
+        for max_lag in (-1, 1.5, True, "2"):
+            with self.subTest(max_lag=max_lag):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "max_lag must be a non-negative integer",
+                ):
+                    ca.calculate_lag_correlations(panel, max_lag=max_lag)
+
+    def test_lag_correlations_reject_bad_and_missing_week_start_with_rows(self):
+        panel = self._lag_panel(
+            ["bad-date", None, "2025-01-06"],
+            index=[4, 8, 12],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.calculate_lag_correlations(panel)
+
+        self.assertEqual(
+            str(raised.exception),
+            "Invalid or missing week_start at panel rows: 4, 8",
+        )
+
+    def test_lag_correlations_reject_timezone_aware_week_start(self):
+        panel = self._lag_panel(
+            pd.DatetimeIndex(["2025-01-06"], tz="Asia/Shanghai")
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "week_start must be timezone-naive"
+        ):
+            ca.calculate_lag_correlations(panel)
+
+    def test_lag_correlations_reject_non_monday_week_start_with_rows(self):
+        panel = self._lag_panel(
+            ["2025-01-07", "2025-01-13"],
+            index=[6, 10],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.calculate_lag_correlations(panel)
+
+        self.assertEqual(
+            str(raised.exception),
+            "week_start must contain Mondays; invalid panel rows: 6",
+        )
+
+    def test_lag_correlations_reject_duplicate_weeks_within_scope(self):
+        panel = self._lag_panel(
+            ["2025-01-06", "2025-01-06", "2025-01-06"],
+            scopes=["A", "B", "A"],
+            index=[1, 2, 3],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.calculate_lag_correlations(panel)
+
+        self.assertEqual(
+            str(raised.exception),
+            "Duplicate week_start values within region_group at panel rows: 1, 3",
+        )
 
     def test_monthly_correlations_aggregate_and_deseasonalize_by_region(self):
         panel = pd.DataFrame(

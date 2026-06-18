@@ -1,5 +1,7 @@
 """Shipment transformations for rainfall correlation analysis."""
 
+from numbers import Integral
+
 import pandas as pd
 
 
@@ -69,7 +71,9 @@ def build_shipment_weekly_panel(shipments, regions, weeks):
         out["load_start_date"], errors="coerce", format="mixed"
     )
     parsed_volume = pd.to_numeric(out["voy_intake_mt"], errors="coerce")
-    invalid_volume = parsed_volume.isna()
+    invalid_volume = parsed_volume.isna() | parsed_volume.isin(
+        [float("inf"), float("-inf")]
+    )
     if invalid_volume.any():
         row_labels = ", ".join(str(index) for index in out.index[invalid_volume])
         raise ValueError(
@@ -115,9 +119,27 @@ def build_rain_weekly_panel(rain, weeks):
             f"{row_labels}"
         )
     out["precipitation_mm"] = parsed_precipitation
-    out = out.dropna(
-        subset=["region_group", "port_name", "date", "precipitation_mm"]
-    )
+    negative_precipitation = out["precipitation_mm"] < 0
+    if negative_precipitation.any():
+        row_labels = ", ".join(
+            str(index) for index in out.index[negative_precipitation]
+        )
+        raise ValueError(
+            f"Negative precipitation_mm at rainfall rows: {row_labels}"
+        )
+    invalid_date = out["date"].isna()
+    if invalid_date.any():
+        row_labels = ", ".join(str(index) for index in out.index[invalid_date])
+        raise ValueError(
+            f"Invalid or missing date at rainfall rows: {row_labels}"
+        )
+    for column in ("region_group", "port_name"):
+        missing = out[column].isna()
+        if missing.any():
+            row_labels = ", ".join(str(index) for index in out.index[missing])
+            raise ValueError(
+                f"Missing {column} at rainfall rows: {row_labels}"
+            )
     out["week_start"] = monday_start(out["date"])
     out = out[out["week_start"].isin(week_index)]
 
@@ -175,16 +197,63 @@ def correlation(left, right, rank=False):
 
 
 def _paired_values(left, right):
-    return pd.DataFrame(
+    pairs = pd.DataFrame(
         {
             "left": pd.Series(left).reset_index(drop=True),
             "right": pd.Series(right).reset_index(drop=True),
         }
     ).dropna()
+    non_finite = pairs.isin([float("inf"), float("-inf")]).any(axis=1)
+    return pairs.loc[~non_finite]
 
 
 def _pair_count(left, right):
     return int(_paired_values(left, right).shape[0])
+
+
+def _validated_lag_panel(panel, scope_column):
+    out = panel.copy()
+    parsed_values = []
+    timezone_aware = []
+    for value in out["week_start"]:
+        try:
+            parsed = pd.Timestamp(value)
+        except (TypeError, ValueError):
+            parsed = pd.NaT
+        parsed_values.append(parsed)
+        timezone_aware.append(
+            not pd.isna(parsed) and parsed.tz is not None
+        )
+
+    parsed_weeks = pd.Series(parsed_values, index=out.index)
+    invalid = parsed_weeks.isna()
+    if invalid.any():
+        row_labels = ", ".join(str(index) for index in out.index[invalid])
+        raise ValueError(
+            f"Invalid or missing week_start at panel rows: {row_labels}"
+        )
+    if any(timezone_aware):
+        raise ValueError("week_start must be timezone-naive")
+
+    parsed_weeks = pd.to_datetime(parsed_weeks).dt.normalize()
+    non_monday = parsed_weeks.dt.weekday != 0
+    if non_monday.any():
+        row_labels = ", ".join(str(index) for index in out.index[non_monday])
+        raise ValueError(
+            f"week_start must contain Mondays; invalid panel rows: {row_labels}"
+        )
+    out["week_start"] = parsed_weeks
+
+    duplicate = out.duplicated(
+        subset=[scope_column, "week_start"], keep=False
+    )
+    if duplicate.any():
+        row_labels = ", ".join(str(index) for index in out.index[duplicate])
+        raise ValueError(
+            f"Duplicate week_start values within {scope_column} "
+            f"at panel rows: {row_labels}"
+        )
+    return out
 
 
 def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
@@ -193,6 +262,14 @@ def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
     ``active_weeks`` counts positive observations for each metric across the
     full scope and therefore does not vary by lag.
     """
+    if (
+        isinstance(max_lag, bool)
+        or not isinstance(max_lag, Integral)
+        or max_lag < 0
+    ):
+        raise ValueError("max_lag must be a non-negative integer")
+
+    panel = _validated_lag_panel(panel, scope_column)
     rows = []
     for scope, group in panel.groupby(scope_column, sort=False):
         group = group.copy()
