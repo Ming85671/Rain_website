@@ -168,6 +168,29 @@ class WeeklyPanelTests(unittest.TestCase):
             "Invalid or missing voy_intake_mt at shipment rows: 5, 12",
         )
 
+    def test_weekly_panel_rejects_negative_volume_with_row_indices(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2025-01-07", "2025-01-08", "2025-01-09"],
+                "region_group": ["Region A"] * 3,
+                "vsl_name": ["One", "Two", "Three"],
+                "voy_intake_mt": [10, -1, -20],
+            },
+            index=[3, 8, 13],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_shipment_weekly_panel(
+                shipments,
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-06"]),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Negative voy_intake_mt at shipment rows: 8, 13",
+        )
+
     def test_weekly_panel_rejects_duplicate_regions(self):
         with self.assertRaisesRegex(ValueError, "Duplicate regions: Region A"):
             ca.build_shipment_weekly_panel(
@@ -683,6 +706,32 @@ class NationalAnalysisTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, f"Zero total {metric}"):
                     ca.build_national_panel(zero_weights)
 
+    def test_build_national_panel_rejects_negative_regional_weight_totals(self):
+        for metric in ("shipments", "volume_mt"):
+            with self.subTest(metric=metric):
+                panel = self._regional_panel()
+                panel.loc[panel["region_group"].eq("B"), metric] = -1
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"Negative {metric} regional totals.*B",
+                ):
+                    ca.build_national_panel(panel)
+
+    def test_build_national_panel_rejects_non_finite_regional_weight_totals(self):
+        for metric in ("shipments", "volume_mt"):
+            for invalid_value in (float("inf"), float("nan")):
+                with self.subTest(metric=metric, invalid_value=invalid_value):
+                    panel = self._regional_panel()
+                    panel[metric] = panel[metric].astype(float)
+                    panel.loc[panel["region_group"].eq("B"), metric] = invalid_value
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"Non-finite {metric} regional totals.*B",
+                    ):
+                        ca.build_national_panel(panel)
+
     def test_national_lags_use_corresponding_rain_and_exact_dates(self):
         weeks = pd.to_datetime(
             [
@@ -750,6 +799,48 @@ class NationalAnalysisTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_print_summary_has_national_headlines_and_every_regional_metric(self):
+        weekly_lags = pd.DataFrame(
+            {
+                "scope": [
+                    "Philippines weighted", "Philippines weighted",
+                    "Philippines weighted", "A", "A", "B", "B",
+                ],
+                "metric": [
+                    "shipments", "shipments", "volume_mt",
+                    "shipments", "volume_mt", "shipments", "volume_mt",
+                ],
+                "rain_leads_weeks": [0, 2, 0, 1, 3, 0, 4],
+                "pearson_anomaly": [-0.2, -0.6, float("nan"), -0.4, -0.3, float("nan"), 0.2],
+                "weeks": [260, 258, 260, 259, 257, 260, 256],
+            }
+        )
+
+        with patch("builtins.print") as printer:
+            ca.print_correlation_summary(weekly_lags)
+
+        lines = [str(call.args[0]) for call in printer.call_args_list]
+        self.assertEqual(
+            lines[0],
+            "Philippines weighted strongest de-seasonalized lag "
+            "(minimum anomaly Pearson):",
+        )
+        self.assertIn("shipments: rain leads 2 week(s), r=-0.600, n=258", lines)
+        self.assertIn("volume_mt: no finite anomaly correlations", lines)
+        self.assertIn(
+            "A | shipments | rain leads 1 week(s) | r=-0.400 | n=259",
+            lines,
+        )
+        self.assertIn(
+            "A | volume_mt | rain leads 3 week(s) | r=-0.300 | n=257",
+            lines,
+        )
+        self.assertIn("B | shipments | no finite anomaly correlations", lines)
+        self.assertIn(
+            "B | volume_mt | rain leads 4 week(s) | r=0.200 | n=256",
+            lines,
+        )
+
     def test_complete_monday_weeks_stays_inside_calendar_years(self):
         weeks = ca.complete_monday_weeks(2021, 2025)
 
@@ -928,8 +1019,8 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(set(result["weekly_lags"]["scope"]), {"A", "B", "Philippines weighted"})
         printed = "\n".join(str(call.args[0]) for call in printer.call_args_list)
-        self.assertIn("Strongest negative de-seasonalized lag — shipments", printed)
-        self.assertIn("Strongest negative de-seasonalized lag — volume_mt", printed)
+        self.assertIn("Philippines weighted strongest de-seasonalized lag", printed)
+        self.assertIn("Regional strongest de-seasonalized lags", printed)
         self.assertIn("Coverage:", printed)
 
 

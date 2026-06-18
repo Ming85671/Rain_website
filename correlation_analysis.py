@@ -83,6 +83,12 @@ def build_shipment_weekly_panel(shipments, regions, weeks):
         raise ValueError(
             f"Invalid or missing voy_intake_mt at shipment rows: {row_labels}"
         )
+    negative_volume = parsed_volume < 0
+    if negative_volume.any():
+        row_labels = ", ".join(str(index) for index in out.index[negative_volume])
+        raise ValueError(
+            f"Negative voy_intake_mt at shipment rows: {row_labels}"
+        )
     out["voy_intake_mt"] = parsed_volume
     out = out.dropna(subset=["load_start_date", "region_group", "vsl_name"])
     out["week_start"] = monday_start(out["load_start_date"])
@@ -382,11 +388,46 @@ def build_national_panel(regional_panel):
         .reset_index(drop=True)
     )
     for metric in ("shipments", "volume_mt"):
+        invalid_values = panel[metric].isna() | panel[metric].isin(
+            [float("inf"), float("-inf")]
+        )
+        if invalid_values.any():
+            labels = ", ".join(
+                sorted(
+                    str(region)
+                    for region in panel.loc[
+                        invalid_values, "region_group"
+                    ].unique()
+                )
+            )
+            raise ValueError(
+                f"Non-finite {metric} regional totals for weights: {labels}"
+            )
         totals = panel.groupby("region_group", sort=True)[metric].sum().reindex(regions)
+        non_finite = totals.isna() | totals.isin([float("inf"), float("-inf")])
+        if non_finite.any():
+            labels = ", ".join(str(region) for region in totals.index[non_finite])
+            raise ValueError(
+                f"Non-finite {metric} regional totals for weights: {labels}"
+            )
+        negative = totals < 0
+        if negative.any():
+            labels = ", ".join(str(region) for region in totals.index[negative])
+            raise ValueError(
+                f"Negative {metric} regional totals for weights: {labels}"
+            )
         total = totals.sum()
-        if not pd.notna(total) or total <= 0:
+        if total == 0:
             raise ValueError(f"Zero total {metric} weights are not allowed")
         metric_weights = totals / total
+        invalid_weights = metric_weights.isna() | metric_weights.isin(
+            [float("inf"), float("-inf")]
+        ) | metric_weights.lt(0)
+        if invalid_weights.any():
+            labels = ", ".join(
+                str(region) for region in metric_weights.index[invalid_weights]
+            )
+            raise ValueError(f"Invalid {metric} regional weights: {labels}")
         weights[f"{metric}_weight"] = metric_weights.to_numpy()
         national[f"rain_{metric}"] = (
             rain_by_week.reindex(columns=regions)
@@ -596,22 +637,58 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _print_strongest_negative(weekly_lags, metric):
-    candidates = weekly_lags[
-        weekly_lags["metric"].eq(metric)
-        & weekly_lags["pearson_anomaly"].notna()
-        & weekly_lags["pearson_anomaly"].lt(0)
+def _strongest_anomaly_row(rows):
+    finite = rows[
+        rows["pearson_anomaly"].notna()
+        & ~rows["pearson_anomaly"].isin([float("inf"), float("-inf")])
     ]
-    label = f"Strongest negative de-seasonalized lag — {metric}"
-    if candidates.empty:
-        print(f"{label}: none")
-        return
-    strongest = candidates.loc[candidates["pearson_anomaly"].idxmin()]
-    print(
-        f"{label}: {strongest['scope']}, rain leads "
-        f"{int(strongest['rain_leads_weeks'])} week(s), "
-        f"r={strongest['pearson_anomaly']:.3f}, n={int(strongest['weeks'])}"
+    if finite.empty:
+        return None
+    return finite.loc[finite["pearson_anomaly"].idxmin()]
+
+
+def _lag_summary_text(rows, separator=", "):
+    strongest = _strongest_anomaly_row(rows)
+    if strongest is None:
+        return "no finite anomaly correlations"
+    return (
+        f"rain leads {int(strongest['rain_leads_weeks'])} week(s)"
+        f"{separator}r={strongest['pearson_anomaly']:.3f}"
+        f"{separator}n={int(strongest['weeks'])}"
     )
+
+
+def print_correlation_summary(weekly_lags):
+    """Print national headlines and complete region-by-metric lag summaries."""
+    national_scope = "Philippines weighted"
+    metrics = ("shipments", "volume_mt")
+    print(
+        "Philippines weighted strongest de-seasonalized lag "
+        "(minimum anomaly Pearson):"
+    )
+    for metric in metrics:
+        rows = weekly_lags[
+            weekly_lags["scope"].eq(national_scope)
+            & weekly_lags["metric"].eq(metric)
+        ]
+        print(f"{metric}: {_lag_summary_text(rows)}")
+
+    print("Regional strongest de-seasonalized lags (minimum anomaly Pearson):")
+    regions = sorted(
+        scope
+        for scope in weekly_lags["scope"].dropna().unique()
+        if scope != national_scope
+    )
+    for region in regions:
+        for metric in metrics:
+            rows = weekly_lags[
+                weekly_lags["scope"].eq(region)
+                & weekly_lags["metric"].eq(metric)
+            ]
+            print(
+                f"{region} | {metric} | "
+                f"{_lag_summary_text(rows, separator=' | ')}"
+            )
 
 
 def main(argv=None):
@@ -658,8 +735,7 @@ def main(argv=None):
     }
     paths = export_results(tables, args.output_dir)
 
-    _print_strongest_negative(weekly_lags, "shipments")
-    _print_strongest_negative(weekly_lags, "volume_mt")
+    print_correlation_summary(weekly_lags)
     print(
         f"Coverage: {len(regions)} regions, {len(weeks)} complete weeks, "
         f"{len(rain.PORTS)} configured ports"
