@@ -95,27 +95,17 @@ class WeeklyPanelTests(unittest.TestCase):
             list(pd.to_datetime(["2025-01-06", "2025-01-13"])),
         )
 
-    def test_weekly_panel_excludes_out_of_range_and_invalid_rows(self):
+    def test_weekly_panel_excludes_out_of_range_valid_rows(self):
         shipments = pd.DataFrame(
             {
                 "load_start_date": [
                     "2025-01-07",
                     "2025-01-08 06:30",
                     "2024-12-30",
-                    "bad-date",
-                    "2025-01-09",
-                    "2025-01-10",
                 ],
-                "region_group": [
-                    "Region A",
-                    "Region A",
-                    "Region A",
-                    "Region A",
-                    None,
-                    "Region A",
-                ],
-                "vsl_name": ["One", "Two", "Earlier", "Bad date", "No region", None],
-                "voy_intake_mt": ["10", "20", "999", "30", "40", "50"],
+                "region_group": ["Region A"] * 3,
+                "vsl_name": ["One", "Two", "Earlier"],
+                "voy_intake_mt": ["10", "20", "999"],
             }
         )
         weeks = pd.DatetimeIndex(["2025-01-06", "2025-01-13"])
@@ -124,6 +114,75 @@ class WeeklyPanelTests(unittest.TestCase):
 
         self.assertEqual(result["shipments"].tolist(), [2, 0])
         self.assertEqual(result["volume_mt"].tolist(), [30.0, 0.0])
+
+    def test_weekly_panel_rejects_invalid_and_missing_dates_with_row_indices(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2025-01-07", "bad-date", None],
+                "region_group": ["Region A"] * 3,
+                "vsl_name": ["One", "Two", "Three"],
+                "voy_intake_mt": [10, 20, 30],
+            },
+            index=[3, 8, 13],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_shipment_weekly_panel(
+                shipments,
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-06"]),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Invalid or missing load_start_date at shipment rows: 8, 13",
+        )
+
+    def test_weekly_panel_rejects_missing_and_blank_vessel_names_with_row_indices(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2025-01-07", "2025-01-08", "2025-01-09"],
+                "region_group": ["Region A"] * 3,
+                "vsl_name": ["One", None, "  \t"],
+                "voy_intake_mt": [10, 20, 30],
+            },
+            index=[3, 8, 13],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_shipment_weekly_panel(
+                shipments,
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-06"]),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Missing or blank vsl_name at shipment rows: 8, 13",
+        )
+
+    def test_weekly_panel_rejects_missing_regions_with_row_indices(self):
+        shipments = pd.DataFrame(
+            {
+                "load_start_date": ["2025-01-07", "2025-01-08", "2025-01-09"],
+                "region_group": ["Region A", None, float("nan")],
+                "vsl_name": ["One", "Two", "Three"],
+                "voy_intake_mt": [10, 20, 30],
+            },
+            index=[3, 8, 13],
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            ca.build_shipment_weekly_panel(
+                shipments,
+                ["Region A"],
+                pd.DatetimeIndex(["2025-01-06"]),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Missing region_group at shipment rows: 8, 13",
+        )
 
     def test_weekly_panel_rejects_invalid_and_missing_volume_with_row_indices(self):
         shipments = pd.DataFrame(

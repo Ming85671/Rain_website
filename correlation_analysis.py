@@ -73,6 +73,24 @@ def build_shipment_weekly_panel(shipments, regions, weeks):
     out["load_start_date"] = pd.to_datetime(
         out["load_start_date"], errors="coerce", format="mixed"
     )
+    invalid_date = out["load_start_date"].isna()
+    if invalid_date.any():
+        row_labels = ", ".join(str(index) for index in out.index[invalid_date])
+        raise ValueError(
+            f"Invalid or missing load_start_date at shipment rows: {row_labels}"
+        )
+    invalid_vessel = out["vsl_name"].isna() | out["vsl_name"].astype(
+        "string"
+    ).str.strip().eq("")
+    if invalid_vessel.any():
+        row_labels = ", ".join(str(index) for index in out.index[invalid_vessel])
+        raise ValueError(
+            f"Missing or blank vsl_name at shipment rows: {row_labels}"
+        )
+    missing_region = out["region_group"].isna()
+    if missing_region.any():
+        row_labels = ", ".join(str(index) for index in out.index[missing_region])
+        raise ValueError(f"Missing region_group at shipment rows: {row_labels}")
     parsed_volume = pd.to_numeric(out["voy_intake_mt"], errors="coerce")
     invalid_volume = parsed_volume.isna() | parsed_volume.isin(
         [float("inf"), float("-inf")]
@@ -89,7 +107,6 @@ def build_shipment_weekly_panel(shipments, regions, weeks):
             f"Negative voy_intake_mt at shipment rows: {row_labels}"
         )
     out["voy_intake_mt"] = parsed_volume
-    out = out.dropna(subset=["load_start_date", "region_group", "vsl_name"])
     out["week_start"] = monday_start(out["load_start_date"])
 
     index = pd.MultiIndex.from_product(
