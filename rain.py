@@ -1190,6 +1190,22 @@ def correlation_kpis(
     }
 
 
+def correlation_page_summary(
+    weekly: pd.DataFrame,
+    coverage: pd.DataFrame,
+    source: str,
+) -> Dict[str, Any]:
+    """Return accurate analysis-window and source metadata for the page."""
+    return {
+        "analysis_start": str(weekly["analysis_start"].min()),
+        "analysis_end": str(weekly["analysis_end"].max()),
+        "weeks": int(coverage["weeks"].min()),
+        "ports": int(coverage["expected_ports"].sum()),
+        "regions": int(len(coverage)),
+        "status": "Live" if source == "live" else "Verified fallback",
+    }
+
+
 def _style_correlation_chart(fig: go.Figure, height: int) -> go.Figure:
     fig.update_layout(
         height=height,
@@ -1285,7 +1301,22 @@ def build_correlation_heatmap(
 
 
 def render_correlation_page() -> None:
-    weekly, monthly, coverage, _weights = load_correlation_outputs()
+    try:
+        database_config = dict(st.secrets["database"])
+    except Exception:
+        database_config = None
+
+    page_data = resolve_correlation_data(database_config)
+    weekly = page_data.weekly
+    monthly = page_data.monthly
+    coverage = page_data.coverage
+    if page_data.warning:
+        st.warning(page_data.warning)
+    summary = correlation_page_summary(
+        weekly,
+        coverage,
+        source=page_data.source,
+    )
 
     st.markdown(
         """
@@ -1303,13 +1334,11 @@ def render_correlation_page() -> None:
         unsafe_allow_html=True,
     )
 
-    weeks = int(coverage["weeks"].min())
-    ports = int(coverage["expected_ports"].sum())
     st.markdown(
         f"""
         <div class="correlation-hero">
           <div class="correlation-title">Rainfall × Nickel Ore Shipments</div>
-          <div class="correlation-subtitle">2021–2025 · {weeks} complete weeks · {ports} ports · {len(coverage)} regions</div>
+          <div class="correlation-subtitle">{summary["analysis_start"]} to {summary["analysis_end"]} · {summary["weeks"]} complete weeks · {summary["ports"]} ports · {summary["regions"]} regions · {summary["status"]}</div>
         </div>
         """,
         unsafe_allow_html=True,

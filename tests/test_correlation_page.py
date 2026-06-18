@@ -132,6 +132,39 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(result["weeks"], 260)
         self.assertEqual(result["active_weeks"], 260)
 
+    def test_correlation_page_summary_uses_actual_window_and_source(self):
+        coverage = pd.DataFrame(
+            {
+                "weeks": [284, 284],
+                "expected_ports": [12, 18],
+            }
+        )
+        weekly = self.weekly.copy()
+        weekly["analysis_end"] = "2026-06-08"
+
+        result = rain.correlation_page_summary(
+            weekly,
+            coverage,
+            source="live",
+        )
+
+        self.assertEqual(result["analysis_start"], "2021-01-04")
+        self.assertEqual(result["analysis_end"], "2026-06-08")
+        self.assertEqual(result["weeks"], 284)
+        self.assertEqual(result["ports"], 30)
+        self.assertEqual(result["status"], "Live")
+
+    def test_correlation_page_summary_labels_fallback_snapshot(self):
+        coverage = pd.DataFrame({"weeks": [260], "expected_ports": [30]})
+
+        result = rain.correlation_page_summary(
+            self.weekly,
+            coverage,
+            source="fallback",
+        )
+
+        self.assertEqual(result["status"], "Verified fallback")
+
     def test_correlation_kpis_report_no_negative_lag(self):
         positive = self.weekly.copy()
         positive["pearson_anomaly"] = 0.1
