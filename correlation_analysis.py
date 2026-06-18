@@ -1,8 +1,12 @@
-"""Shipment transformations for rainfall correlation analysis."""
+"""Offline rainfall and shipment correlation analysis."""
 
+import argparse
 from numbers import Integral
+from pathlib import Path
 
 import pandas as pd
+
+import rain
 
 
 PORT_ALIASES = {
@@ -349,3 +353,320 @@ def calculate_monthly_correlations(panel):
                 }
             )
     return pd.DataFrame(rows)
+
+
+def build_national_panel(regional_panel):
+    """Build weekly national totals and fixed metric-specific rainfall weights."""
+    panel = regional_panel.copy()
+    panel["week_start"] = pd.to_datetime(panel["week_start"], format="mixed")
+    duplicate = panel.duplicated(["region_group", "week_start"], keep=False)
+    if duplicate.any():
+        raise ValueError("Duplicate region-week rows are not allowed")
+    if panel["rain_mm_day"].isna().any():
+        raise ValueError("Missing regional rainfall in common panel")
+
+    regions = sorted(panel["region_group"].unique())
+    weights = pd.DataFrame({"region_group": regions})
+    rain_by_week = panel.pivot(
+        index="week_start", columns="region_group", values="rain_mm_day"
+    ).sort_index()
+    if rain_by_week.isna().any().any():
+        raise ValueError("Missing regional rainfall in common panel")
+
+    national = (
+        panel.groupby("week_start", as_index=False, sort=True)[
+            ["shipments", "volume_mt"]
+        ]
+        .sum()
+        .sort_values("week_start")
+        .reset_index(drop=True)
+    )
+    for metric in ("shipments", "volume_mt"):
+        totals = panel.groupby("region_group", sort=True)[metric].sum().reindex(regions)
+        total = totals.sum()
+        if not pd.notna(total) or total <= 0:
+            raise ValueError(f"Zero total {metric} weights are not allowed")
+        metric_weights = totals / total
+        weights[f"{metric}_weight"] = metric_weights.to_numpy()
+        national[f"rain_{metric}"] = (
+            rain_by_week.reindex(columns=regions)
+            .mul(metric_weights, axis="columns")
+            .sum(axis="columns")
+            .to_numpy()
+        )
+    return national, weights
+
+
+def _national_metric_panel(national_panel, metric):
+    out = national_panel[
+        ["week_start", f"rain_{metric}", metric]
+    ].rename(columns={f"rain_{metric}": "rain_mm_day"})
+    out["region_group"] = "Philippines weighted"
+    other_metric = "volume_mt" if metric == "shipments" else "shipments"
+    out[other_metric] = out[metric]
+    return add_weekly_anomalies(out)
+
+
+def calculate_national_lag_correlations(national_panel, max_lag=4):
+    """Calculate national lags with each metric's corresponding weighted rain."""
+    rows = []
+    for metric in ("shipments", "volume_mt"):
+        metric_panel = _national_metric_panel(national_panel, metric)
+        result = calculate_lag_correlations(metric_panel, max_lag=max_lag)
+        rows.append(result[result["metric"] == metric])
+    return pd.concat(rows, ignore_index=True)
+
+
+def calculate_national_monthly_correlations(national_panel):
+    """Calculate national monthly robustness correlations by metric."""
+    rows = []
+    for metric in ("shipments", "volume_mt"):
+        metric_panel = _national_metric_panel(national_panel, metric)
+        result = calculate_monthly_correlations(metric_panel)
+        rows.append(result[result["metric"] == metric])
+    return pd.concat(rows, ignore_index=True)
+
+
+def complete_monday_weeks(start_year, end_year):
+    """Return complete Monday-Sunday weeks inside a >=5-year calendar range."""
+    if end_year < start_year:
+        raise ValueError("end_year must be >= start_year")
+    if end_year - start_year + 1 < 5:
+        raise ValueError("Analysis requires at least five calendar years")
+    first_day = pd.Timestamp(year=start_year, month=1, day=1)
+    first_monday = first_day + pd.Timedelta(days=(-first_day.weekday()) % 7)
+    final_day = pd.Timestamp(year=end_year, month=12, day=31)
+    last_monday = final_day - pd.Timedelta(days=final_day.weekday())
+    if last_monday + pd.Timedelta(days=6) > final_day:
+        last_monday -= pd.Timedelta(days=7)
+    return pd.date_range(first_monday, last_monday, freq="W-MON")
+
+
+def _validate_rainfall_data(frame, ports, start_year, end_year):
+    required = {"date", "port_name", "region_group", "precipitation_mm"}
+    missing_columns = sorted(required - set(frame.columns))
+    if missing_columns:
+        raise ValueError(
+            f"Rainfall data missing columns: {', '.join(missing_columns)}"
+        )
+    out = frame.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce", format="mixed")
+    if out["date"].isna().any():
+        raise ValueError("Rainfall data contains invalid dates")
+    outside_years = ~out["date"].dt.year.between(start_year, end_year)
+    if outside_years.any():
+        raise ValueError(
+            f"Rainfall data contains dates outside {start_year}-{end_year}"
+        )
+    duplicate = out.duplicated(["port_name", "date"], keep=False)
+    if duplicate.any():
+        raise ValueError("Rainfall data contains duplicate port-date rows")
+    expected_regions = {
+        port_name: details["region_group"] for port_name, details in ports.items()
+    }
+    unknown = sorted(set(out["port_name"]) - set(expected_regions))
+    if unknown:
+        raise ValueError(f"Rainfall data contains unknown ports: {', '.join(unknown)}")
+    mapped_regions = out["port_name"].map(expected_regions)
+    if mapped_regions.ne(out["region_group"]).any():
+        raise ValueError("Rainfall port-region mapping does not match rain.PORTS")
+    return out
+
+
+def load_rainfall_data(start_year, end_year, cache_path=None, ports=None):
+    """Load validated daily rain from a supplied pickle or the existing loader."""
+    ports = rain.PORTS if ports is None else ports
+    if cache_path is not None:
+        cache_path = Path(cache_path)
+        if not cache_path.is_file():
+            raise ValueError(f"Rain cache does not exist: {cache_path}")
+        frame = pd.read_pickle(cache_path)
+    else:
+        frame = rain.load_historical_data_cached(
+            f"{start_year}-01-01", f"{end_year}-12-31"
+        )
+    return _validate_rainfall_data(frame, ports, start_year, end_year)
+
+
+def expected_port_counts(ports):
+    """Return deterministic expected port counts by configured region."""
+    rows = pd.DataFrame(
+        [details["region_group"] for details in ports.values()],
+        columns=["region_group"],
+    )
+    return (
+        rows.groupby("region_group", as_index=False, sort=True)
+        .size()
+        .rename(columns={"size": "expected_ports"})
+    )
+
+
+def validate_rain_coverage(rain_weekly, regions, weeks, expected_ports):
+    """Require every region-week to contain seven days and all configured ports."""
+    grid = pd.MultiIndex.from_product(
+        [list(regions), pd.DatetimeIndex(weeks)],
+        names=["region_group", "week_start"],
+    ).to_frame(index=False)
+    checked = grid.merge(
+        rain_weekly,
+        on=["region_group", "week_start"],
+        how="left",
+        validate="one_to_one",
+    ).merge(expected_ports, on="region_group", how="left", validate="many_to_one")
+    failures = checked[
+        checked["rain_mm_day"].isna()
+        | checked["rain_days"].ne(7)
+        | checked["min_ports"].ne(checked["expected_ports"])
+    ]
+    if not failures.empty:
+        details = []
+        for row in failures.itertuples():
+            details.append(
+                f"{row.region_group} {row.week_start:%Y-%m-%d}: "
+                f"{row.rain_days} rain days, {row.min_ports}/{row.expected_ports} ports"
+            )
+        raise ValueError("Incomplete rainfall coverage: " + "; ".join(details))
+    return (
+        checked.groupby("region_group", as_index=False, sort=True)
+        .agg(
+            weeks=("week_start", "nunique"),
+            min_rain_days=("rain_days", "min"),
+            expected_ports=("expected_ports", "first"),
+            min_ports=("min_ports", "min"),
+        )
+        .assign(expected_weeks=len(weeks))[
+            [
+                "region_group", "weeks", "expected_weeks", "min_rain_days",
+                "expected_ports", "min_ports",
+            ]
+        ]
+    )
+
+
+def merge_weekly_panels(shipment_weekly, rain_weekly):
+    """Merge complete weekly panels and identify any missing rainfall keys."""
+    merged = shipment_weekly.merge(
+        rain_weekly,
+        on=["region_group", "week_start"],
+        how="left",
+        validate="one_to_one",
+    )
+    missing = merged[merged["rain_mm_day"].isna()]
+    if not missing.empty:
+        labels = ", ".join(
+            f"{row.region_group} {row.week_start:%Y-%m-%d}"
+            for row in missing.itertuples()
+        )
+        raise ValueError(f"Missing region-week rainfall: {labels}")
+    return merged
+
+
+RESULT_FILENAMES = {
+    "weekly_lags": "weekly_lag_correlations.csv",
+    "monthly": "monthly_correlations.csv",
+    "coverage": "coverage.csv",
+    "regional_weights": "regional_weights.csv",
+}
+
+
+def export_results(tables, output_dir):
+    """Write the four documented analysis tables and return their paths."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for key, filename in RESULT_FILENAMES.items():
+        path = output_dir / filename
+        tables[key].to_csv(path, index=False)
+        paths[key] = path
+    return paths
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Analyze rainfall against Philippine nickel shipments."
+    )
+    parser.add_argument("--shipments-file", type=Path, required=True)
+    parser.add_argument("--sheet", default="Raw_Cleaned")
+    parser.add_argument("--start-year", type=int, default=2021)
+    parser.add_argument("--end-year", type=int, default=2025)
+    parser.add_argument("--rain-cache", type=Path)
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("correlation_output")
+    )
+    return parser.parse_args(argv)
+
+
+def _print_strongest_negative(weekly_lags, metric):
+    candidates = weekly_lags[
+        weekly_lags["metric"].eq(metric)
+        & weekly_lags["pearson_anomaly"].notna()
+        & weekly_lags["pearson_anomaly"].lt(0)
+    ]
+    label = f"Strongest negative de-seasonalized lag — {metric}"
+    if candidates.empty:
+        print(f"{label}: none")
+        return
+    strongest = candidates.loc[candidates["pearson_anomaly"].idxmin()]
+    print(
+        f"{label}: {strongest['scope']}, rain leads "
+        f"{int(strongest['rain_leads_weeks'])} week(s), "
+        f"r={strongest['pearson_anomaly']:.3f}, n={int(strongest['weeks'])}"
+    )
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    weeks = complete_monday_weeks(args.start_year, args.end_year)
+    regions = list(rain.REGION_ORDER)
+    port_region_map = {
+        port_name: details["region_group"]
+        for port_name, details in rain.PORTS.items()
+    }
+    shipments = pd.read_excel(args.shipments_file, sheet_name=args.sheet)
+    shipments = map_shipment_regions(shipments, port_region_map)
+    shipment_weekly = build_shipment_weekly_panel(shipments, regions, weeks)
+
+    rainfall = load_rainfall_data(
+        args.start_year, args.end_year, args.rain_cache
+    )
+    rain_weekly = build_rain_weekly_panel(rainfall, weeks)
+    coverage = validate_rain_coverage(
+        rain_weekly, regions, weeks, expected_port_counts(rain.PORTS)
+    )
+    regional_panel = add_weekly_anomalies(
+        merge_weekly_panels(shipment_weekly, rain_weekly)
+    )
+
+    regional_lags = calculate_lag_correlations(regional_panel)
+    national_panel, regional_weights = build_national_panel(regional_panel)
+    weekly_lags = pd.concat(
+        [regional_lags, calculate_national_lag_correlations(national_panel)],
+        ignore_index=True,
+    )
+    monthly = pd.concat(
+        [
+            calculate_monthly_correlations(regional_panel),
+            calculate_national_monthly_correlations(national_panel),
+        ],
+        ignore_index=True,
+    )
+    tables = {
+        "weekly_lags": weekly_lags,
+        "monthly": monthly,
+        "coverage": coverage,
+        "regional_weights": regional_weights,
+    }
+    paths = export_results(tables, args.output_dir)
+
+    _print_strongest_negative(weekly_lags, "shipments")
+    _print_strongest_negative(weekly_lags, "volume_mt")
+    print(
+        f"Coverage: {len(regions)} regions, {len(weeks)} complete weeks, "
+        f"{len(rain.PORTS)} configured ports"
+    )
+    print("Outputs: " + ", ".join(str(path) for path in paths.values()))
+    return tables
+
+
+if __name__ == "__main__":
+    main()

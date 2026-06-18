@@ -1,5 +1,8 @@
 import math
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 from pandas.testing import assert_frame_equal, assert_series_equal
@@ -632,6 +635,302 @@ class CorrelationTests(unittest.TestCase):
         self.assertEqual(indexed.loc[("A", "shipments"), "months"], 6)
         self.assertAlmostEqual(indexed.loc[("B", "shipments"), "pearson_raw"], -1.0)
         self.assertAlmostEqual(indexed.loc[("B", "volume_mt"), "pearson_raw"], 1.0)
+
+
+class NationalAnalysisTests(unittest.TestCase):
+    def _regional_panel(self):
+        return pd.DataFrame(
+            {
+                "region_group": ["B", "A", "B", "A"],
+                "week_start": pd.to_datetime(
+                    ["2025-01-06", "2025-01-06", "2025-01-13", "2025-01-13"]
+                ),
+                "rain_mm_day": [100.0, 10.0, 200.0, 20.0],
+                "shipments": [1, 9, 1, 9],
+                "volume_mt": [90.0, 10.0, 90.0, 10.0],
+            }
+        )
+
+    def test_build_national_panel_uses_fixed_metric_specific_weights(self):
+        national, weights = ca.build_national_panel(self._regional_panel())
+
+        self.assertEqual(national["week_start"].tolist(), list(pd.to_datetime(
+            ["2025-01-06", "2025-01-13"]
+        )))
+        self.assertEqual(national["shipments"].tolist(), [10, 10])
+        self.assertEqual(national["volume_mt"].tolist(), [100.0, 100.0])
+        self.assertEqual(weights["region_group"].tolist(), ["A", "B"])
+        indexed = weights.set_index("region_group")
+        self.assertAlmostEqual(indexed.loc["A", "shipments_weight"], 0.9)
+        self.assertAlmostEqual(indexed.loc["A", "volume_mt_weight"], 0.1)
+        self.assertAlmostEqual(national.loc[0, "rain_shipments"], 19.0)
+        self.assertAlmostEqual(national.loc[0, "rain_volume_mt"], 91.0)
+
+    def test_build_national_panel_rejects_invalid_common_panel(self):
+        duplicate = pd.concat([self._regional_panel(), self._regional_panel().iloc[[0]]])
+        with self.assertRaisesRegex(ValueError, "Duplicate region-week"):
+            ca.build_national_panel(duplicate)
+
+        missing = self._regional_panel()
+        missing.loc[0, "rain_mm_day"] = float("nan")
+        with self.assertRaisesRegex(ValueError, "Missing regional rainfall"):
+            ca.build_national_panel(missing)
+
+        for metric in ("shipments", "volume_mt"):
+            with self.subTest(metric=metric):
+                zero_weights = self._regional_panel()
+                zero_weights[metric] = 0
+                with self.assertRaisesRegex(ValueError, f"Zero total {metric}"):
+                    ca.build_national_panel(zero_weights)
+
+    def test_national_lags_use_corresponding_rain_and_exact_dates(self):
+        weeks = pd.to_datetime(
+            [
+                "2025-01-06", "2025-01-13", "2025-01-20",
+                "2025-02-03", "2025-02-10", "2025-02-17",
+            ]
+        )
+        national = pd.DataFrame(
+            {
+                "week_start": weeks,
+                "rain_shipments": [1.0, 2.0, 999.0, 100.0, 200.0, 9999.0],
+                "rain_volume_mt": [9.0, 8.0, 999.0, 7.0, 6.0, 9999.0],
+                "shipments": [0.0, 4.0, 3.0, 0.0, 2.0, 1.0],
+                "volume_mt": [0.0, 40.0, 30.0, 0.0, 20.0, 10.0],
+            }
+        )
+
+        result = ca.calculate_national_lag_correlations(national, max_lag=1)
+
+        self.assertEqual(
+            list(result.columns),
+            [
+                "scope", "metric", "rain_leads_weeks", "pearson_raw",
+                "spearman_raw", "pearson_anomaly", "weeks", "active_weeks",
+            ],
+        )
+        self.assertEqual(set(result["scope"]), {"Philippines weighted"})
+        lag_one = result[result["rain_leads_weeks"] == 1].set_index("metric")
+        self.assertEqual(lag_one.loc["shipments", "weeks"], 4)
+        self.assertEqual(lag_one.loc["volume_mt", "weeks"], 4)
+        self.assertLess(lag_one.loc["shipments", "pearson_raw"], 0)
+        self.assertGreater(lag_one.loc["volume_mt", "pearson_raw"], 0)
+        self.assertAlmostEqual(lag_one.loc["shipments", "spearman_raw"], -1.0)
+        self.assertAlmostEqual(lag_one.loc["volume_mt", "spearman_raw"], 1.0)
+
+    def test_national_monthly_results_are_appendable_to_regional_schema(self):
+        national = pd.DataFrame(
+            {
+                "week_start": pd.to_datetime(
+                    [
+                        "2024-01-01", "2024-02-05", "2024-03-04",
+                        "2025-01-06", "2025-02-03", "2025-03-03",
+                    ]
+                ),
+                "rain_shipments": [1, 2, 3, 4, 5, 6],
+                "rain_volume_mt": [6, 5, 4, 3, 2, 1],
+                "shipments": [1, 2, 3, 4, 5, 6],
+                "volume_mt": [10, 20, 30, 40, 50, 60],
+            }
+        )
+
+        national_result = ca.calculate_national_monthly_correlations(national)
+        regional_columns = list(
+            ca.calculate_monthly_correlations(
+                self._regional_panel().assign(
+                    rain_mm_day=lambda frame: frame["rain_mm_day"]
+                )
+            ).columns
+        )
+
+        self.assertEqual(list(national_result.columns), regional_columns)
+        indexed = national_result.set_index("metric")
+        self.assertAlmostEqual(indexed.loc["shipments", "pearson_raw"], 1.0)
+        self.assertAlmostEqual(indexed.loc["volume_mt", "pearson_raw"], -1.0)
+
+
+class IntegrationTests(unittest.TestCase):
+    def test_complete_monday_weeks_stays_inside_calendar_years(self):
+        weeks = ca.complete_monday_weeks(2021, 2025)
+
+        self.assertEqual(weeks[0], pd.Timestamp("2021-01-04"))
+        self.assertEqual(weeks[-1], pd.Timestamp("2025-12-22"))
+        self.assertEqual(len(weeks), 260)
+        self.assertTrue((weeks.weekday == 0).all())
+        self.assertTrue(((weeks + pd.Timedelta(days=6)).year <= 2025).all())
+
+    def test_complete_monday_weeks_validates_order_and_five_year_minimum(self):
+        with self.assertRaisesRegex(ValueError, "end_year must be >= start_year"):
+            ca.complete_monday_weeks(2025, 2024)
+        with self.assertRaisesRegex(ValueError, "at least five calendar years"):
+            ca.complete_monday_weeks(2022, 2025)
+
+    def test_coverage_requires_every_day_and_expected_port(self):
+        weeks = pd.DatetimeIndex(["2025-01-06"])
+        rain_weekly = pd.DataFrame(
+            {
+                "region_group": ["A", "B"],
+                "week_start": weeks.repeat(2),
+                "rain_mm_day": [1.0, 2.0],
+                "rain_days": [7, 6],
+                "min_ports": [2, 1],
+            }
+        )
+        expected = pd.DataFrame(
+            {"region_group": ["A", "B"], "expected_ports": [2, 2]}
+        )
+
+        with self.assertRaisesRegex(ValueError, "B.*rain days.*ports"):
+            ca.validate_rain_coverage(rain_weekly, ["A", "B"], weeks, expected)
+
+    def test_merge_fails_clearly_when_region_week_rainfall_is_missing(self):
+        shipments = pd.DataFrame(
+            {
+                "region_group": ["A", "B"],
+                "week_start": pd.to_datetime(["2025-01-06"] * 2),
+                "shipments": [1, 1],
+                "volume_mt": [10, 20],
+            }
+        )
+        rain_weekly = pd.DataFrame(
+            {
+                "region_group": ["A"],
+                "week_start": pd.to_datetime(["2025-01-06"]),
+                "rain_mm_day": [1.0],
+                "rain_days": [7],
+                "min_ports": [1],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "Missing region-week rainfall: B 2025-01-06"):
+            ca.merge_weekly_panels(shipments, rain_weekly)
+
+    def test_load_rainfall_uses_validated_pickle_or_loader_without_writing(self):
+        rain_frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2021-01-01"]),
+                "port_name": ["P1"],
+                "region_group": ["A"],
+                "precipitation_mm": [1.0],
+            }
+        )
+        ports = {"P1": {"region_group": "A"}}
+        with TemporaryDirectory() as directory:
+            cache = Path(directory) / "rain.pkl"
+            rain_frame.to_pickle(cache)
+            loaded = ca.load_rainfall_data(2021, 2025, cache, ports=ports)
+            assert_frame_equal(loaded, rain_frame)
+
+            with patch.object(ca.rain, "load_historical_data_cached", return_value=rain_frame) as loader:
+                loaded_live = ca.load_rainfall_data(2021, 2025, ports=ports)
+            loader.assert_called_once_with("2021-01-01", "2025-12-31")
+            assert_frame_equal(loaded_live, rain_frame)
+            self.assertEqual({path.name for path in Path(directory).iterdir()}, {"rain.pkl"})
+
+    def test_load_rainfall_rejects_cache_dates_outside_selected_years(self):
+        rain_frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2020-12-31"]),
+                "port_name": ["P1"],
+                "region_group": ["A"],
+                "precipitation_mm": [1.0],
+            }
+        )
+        with TemporaryDirectory() as directory:
+            cache = Path(directory) / "rain.pkl"
+            rain_frame.to_pickle(cache)
+
+            with self.assertRaisesRegex(ValueError, "outside 2021-2025"):
+                ca.load_rainfall_data(
+                    2021, 2025, cache, ports={"P1": {"region_group": "A"}}
+                )
+
+    def test_export_results_writes_exact_four_filenames(self):
+        tables = {
+            "weekly_lags": pd.DataFrame({"scope": ["A"]}),
+            "monthly": pd.DataFrame({"scope": ["A"]}),
+            "coverage": pd.DataFrame({"region_group": ["A"]}),
+            "regional_weights": pd.DataFrame({"region_group": ["A"]}),
+        }
+        with TemporaryDirectory() as directory:
+            paths = ca.export_results(tables, Path(directory))
+
+            self.assertEqual(
+                {path.name for path in Path(directory).glob("*.csv")},
+                {
+                    "weekly_lag_correlations.csv",
+                    "monthly_correlations.csv",
+                    "coverage.csv",
+                    "regional_weights.csv",
+                },
+            )
+            self.assertEqual(set(paths), set(tables))
+
+    def test_cli_orchestrates_complete_analysis_without_network(self):
+        weeks = pd.date_range("2025-01-06", periods=4, freq="W-MON")
+        shipments = pd.DataFrame(
+            {
+                "load_port": ["P1", "P2", "P1", "P2"],
+                "load_start_date": [
+                    "2025-01-06", "2025-01-06", "2025-01-13", "2025-01-13"
+                ],
+                "vsl_name": ["a", "b", "c", "d"],
+                "voy_intake_mt": [10, 20, 30, 40],
+            }
+        )
+        dates = [day for week in weeks for day in pd.date_range(week, periods=7)]
+        rain_daily = pd.DataFrame(
+            [
+                {
+                    "date": day,
+                    "port_name": port,
+                    "region_group": region,
+                    "precipitation_mm": float(day.day + offset),
+                }
+                for day in dates
+                for offset, (port, region) in enumerate((("P1", "A"), ("P2", "B")))
+            ]
+        )
+        fake_ports = {
+            "P1": {"region_group": "A"},
+            "P2": {"region_group": "B"},
+        }
+        captured = {}
+
+        def capture_export(tables, output_dir):
+            captured.update(tables)
+            captured["output_dir"] = output_dir
+            return {key: output_dir / f"{key}.csv" for key in tables}
+
+        with (
+            patch.object(ca, "complete_monday_weeks", return_value=weeks),
+            patch.object(ca.pd, "read_excel", return_value=shipments) as read_excel,
+            patch.object(ca, "load_rainfall_data", return_value=rain_daily) as load_rain,
+            patch.object(ca.rain, "PORTS", fake_ports),
+            patch.object(ca.rain, "REGION_ORDER", ["A", "B"]),
+            patch.object(ca, "export_results", side_effect=capture_export),
+            patch("builtins.print") as printer,
+        ):
+            result = ca.main(
+                [
+                    "--shipments-file", "shipments.xlsx",
+                    "--rain-cache", "rain.pkl",
+                    "--output-dir", "out",
+                ]
+            )
+
+        read_excel.assert_called_once_with(Path("shipments.xlsx"), sheet_name="Raw_Cleaned")
+        load_rain.assert_called_once_with(2021, 2025, Path("rain.pkl"))
+        self.assertEqual(captured["output_dir"], Path("out"))
+        self.assertEqual(
+            set(captured) - {"output_dir"},
+            {"weekly_lags", "monthly", "coverage", "regional_weights"},
+        )
+        self.assertEqual(set(result["weekly_lags"]["scope"]), {"A", "B", "Philippines weighted"})
+        printed = "\n".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("Strongest negative de-seasonalized lag — shipments", printed)
+        self.assertIn("Strongest negative de-seasonalized lag — volume_mt", printed)
+        self.assertIn("Coverage:", printed)
 
 
 if __name__ == "__main__":
