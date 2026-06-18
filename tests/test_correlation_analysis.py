@@ -686,6 +686,8 @@ class NationalAnalysisTests(unittest.TestCase):
         indexed = weights.set_index("region_group")
         self.assertAlmostEqual(indexed.loc["A", "shipments_weight"], 0.9)
         self.assertAlmostEqual(indexed.loc["A", "volume_mt_weight"], 0.1)
+        self.assertAlmostEqual(weights["shipments_weight"].sum(), 1.0)
+        self.assertAlmostEqual(weights["volume_mt_weight"].sum(), 1.0)
         self.assertAlmostEqual(national.loc[0, "rain_shipments"], 19.0)
         self.assertAlmostEqual(national.loc[0, "rain_volume_mt"], 91.0)
 
@@ -731,6 +733,18 @@ class NationalAnalysisTests(unittest.TestCase):
                         f"Non-finite {metric} regional totals.*B",
                     ):
                         ca.build_national_panel(panel)
+
+    def test_build_national_panel_rejects_overflowing_total_weight_basis(self):
+        for metric in ("shipments", "volume_mt"):
+            with self.subTest(metric=metric):
+                panel = self._regional_panel()
+                panel[metric] = 5e307
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"Non-finite total {metric} weights",
+                ):
+                    ca.build_national_panel(panel)
 
     def test_national_lags_use_corresponding_rain_and_exact_dates(self):
         weeks = pd.to_datetime(

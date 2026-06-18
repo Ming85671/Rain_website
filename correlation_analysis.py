@@ -1,6 +1,7 @@
 """Offline rainfall and shipment correlation analysis."""
 
 import argparse
+import math
 from numbers import Integral
 from pathlib import Path
 
@@ -416,8 +417,12 @@ def build_national_panel(regional_panel):
             raise ValueError(
                 f"Negative {metric} regional totals for weights: {labels}"
             )
-        total = totals.sum()
-        if total == 0:
+        total = sum(float(value) for value in totals)
+        if not math.isfinite(total):
+            raise ValueError(
+                f"Non-finite total {metric} weights are not allowed"
+            )
+        if total <= 0:
             raise ValueError(f"Zero total {metric} weights are not allowed")
         metric_weights = totals / total
         invalid_weights = metric_weights.isna() | metric_weights.isin(
@@ -428,6 +433,13 @@ def build_national_panel(regional_panel):
                 str(region) for region in metric_weights.index[invalid_weights]
             )
             raise ValueError(f"Invalid {metric} regional weights: {labels}")
+        weight_sum = sum(float(value) for value in metric_weights)
+        if not math.isfinite(weight_sum) or not math.isclose(
+            weight_sum, 1.0, rel_tol=1e-12, abs_tol=1e-12
+        ):
+            raise ValueError(
+                f"Invalid {metric} regional weight sum: {weight_sum}"
+            )
         weights[f"{metric}_weight"] = metric_weights.to_numpy()
         national[f"rain_{metric}"] = (
             rain_by_week.reindex(columns=regions)
