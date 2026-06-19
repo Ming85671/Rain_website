@@ -1013,6 +1013,7 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
 class CorrelationPageData:
     weekly: pd.DataFrame
     monthly: pd.DataFrame
+    rolling_monthly: pd.DataFrame
     coverage: pd.DataFrame
     weights: pd.DataFrame
     source: str
@@ -1024,6 +1025,7 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
     filenames = [
         "weekly_lag_correlations.csv",
         "monthly_correlations.csv",
+        "rolling_monthly_correlations.csv",
         "coverage.csv",
         "regional_weights.csv",
     ]
@@ -1034,11 +1036,12 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         )
 
     tables = [pd.read_csv(data_dir / name) for name in filenames]
-    weekly, monthly, coverage, weights = tables
+    weekly, monthly, rolling_monthly, coverage, weights = tables
     for frame in [weekly, monthly]:
         frame["analysis_start"] = frame["analysis_start"].astype(str)
         frame["analysis_end"] = frame["analysis_end"].astype(str)
-    return weekly, monthly, coverage, weights
+    rolling_monthly["month"] = rolling_monthly["month"].astype(str)
+    return weekly, monthly, rolling_monthly, coverage, weights
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
@@ -1102,6 +1105,7 @@ def load_live_correlation_outputs(config_items, today_key: str):
     return (
         tables["weekly_lags"],
         tables["monthly"],
+        tables["rolling_monthly"],
         tables["coverage"],
         tables["regional_weights"],
     )
@@ -1118,13 +1122,14 @@ def resolve_correlation_data(
     if database_config:
         try:
             config_items = tuple(sorted(dict(database_config).items()))
-            weekly, monthly, coverage, weights = load_live_correlation_outputs(
+            weekly, monthly, rolling_monthly, coverage, weights = load_live_correlation_outputs(
                 config_items,
                 today_key,
             )
             return CorrelationPageData(
                 weekly,
                 monthly,
+                rolling_monthly,
                 coverage,
                 weights,
                 source="live",
@@ -1140,10 +1145,11 @@ def resolve_correlation_data(
             "Showing the verified snapshot instead."
         )
 
-    weekly, monthly, coverage, weights = load_correlation_outputs()
+    weekly, monthly, rolling_monthly, coverage, weights = load_correlation_outputs()
     return CorrelationPageData(
         weekly,
         monthly,
+        rolling_monthly,
         coverage,
         weights,
         source="fallback",
@@ -1301,6 +1307,93 @@ def build_correlation_heatmap(
     return _style_correlation_chart(fig, 470)
 
 
+def describe_correlation(value: float) -> str:
+    """Return a plain-English strength and direction label."""
+    if not math.isfinite(value):
+        return "Insufficient data"
+    magnitude = abs(value)
+    if magnitude < 0.20:
+        return "No clear relationship"
+    if magnitude < 0.40:
+        strength = "Weak"
+    elif magnitude < 0.60:
+        strength = "Moderate"
+    else:
+        strength = "Strong"
+    direction = "negative" if value < 0 else "positive"
+    return f"{strength} {direction} relationship"
+
+
+def monthly_volume_summary(monthly: pd.DataFrame, scope: str) -> Dict[str, Any]:
+    """Summarize raw and seasonally adjusted monthly volume correlations."""
+    selected = monthly[
+        monthly["scope"].eq(scope) & monthly["metric"].eq("volume_mt")
+    ]
+    if len(selected) != 1:
+        raise ValueError(f"Expected one monthly volume row for {scope}")
+    row = selected.iloc[0]
+    raw = float(row["pearson_raw"])
+    adjusted = float(row["pearson_anomaly"])
+    if raw <= -0.20 and abs(adjusted) < 0.20:
+        explanation = (
+            "The overall negative relationship mainly reflects the normal wet season. "
+            "Unusually wet months do not show a clear additional relationship with shipment volume."
+        )
+    elif raw <= -0.20 and adjusted <= -0.20:
+        explanation = (
+            "The negative relationship remains after normal seasonality is removed, "
+            "so unusually wet months are also associated with lower shipment volume."
+        )
+    else:
+        explanation = (
+            "The monthly data does not show a clear overall negative relationship "
+            "between rainfall and shipment volume."
+        )
+    return {
+        "raw": raw,
+        "adjusted": adjusted,
+        "verdict": describe_correlation(raw),
+        "explanation": explanation,
+    }
+
+
+def build_rolling_monthly_chart(
+    rolling_monthly: pd.DataFrame,
+    scope: str,
+) -> go.Figure:
+    """Plot the selected scope's rolling 24-month raw Pearson correlation."""
+    selected = rolling_monthly[rolling_monthly["scope"].eq(scope)].copy()
+    selected["month"] = pd.to_datetime(selected["month"], errors="coerce")
+    selected = selected.dropna(subset=["month", "pearson_raw"]).sort_values("month")
+    fig = go.Figure()
+    if selected.empty:
+        fig.add_annotation(
+            text="At least 24 complete months are required.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font=dict(color="#5F6B7A", size=14),
+        )
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=selected["month"],
+                y=selected["pearson_raw"],
+                mode="lines+markers",
+                name="24-month correlation",
+                line=dict(color=CORRELATION_RED, width=3),
+                marker=dict(size=7),
+                hovertemplate="Window ending %{x|%b %Y}<br>r = %{y:.3f}<extra></extra>",
+            )
+        )
+    fig.add_hline(y=0, line_width=1.5, line_dash="dash", line_color="#94A3B8")
+    fig.update_xaxes(title="24-month window ending")
+    fig.update_yaxes(title="Raw Pearson correlation", tickformat=".2f")
+    return _style_correlation_chart(fig, 410)
+
+
 def render_correlation_page() -> None:
     try:
         database_config = dict(st.secrets["database"])
@@ -1310,6 +1403,7 @@ def render_correlation_page() -> None:
     page_data = resolve_correlation_data(database_config)
     weekly = page_data.weekly
     monthly = page_data.monthly
+    rolling_monthly = page_data.rolling_monthly
     coverage = page_data.coverage
     if page_data.warning:
         st.warning(page_data.warning)
@@ -1325,10 +1419,14 @@ def render_correlation_page() -> None:
         .correlation-hero {border-top:5px solid #002FA7; border-bottom:1px solid #D9DEE7; padding:20px 4px 22px; margin-bottom:18px;}
         .correlation-title {font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-size:3rem; line-height:1; font-weight:800; color:#111827; margin:0;}
         .correlation-subtitle {font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; color:#5F6B7A; margin-top:10px; font-size:1rem;}
-        .correlation-card {background:#FFFFFF; border:1px solid #D9DEE7; border-radius:4px; padding:18px 20px; min-height:118px;}
+        .correlation-card {background:#FFFFFF; border:1px solid #D9DEE7; border-radius:4px; padding:20px 22px; min-height:190px;}
         .correlation-label {color:#5F6B7A; font-size:.78rem; text-transform:uppercase; letter-spacing:.02em;}
-        .correlation-value {color:#0B5FFF; font-size:2.15rem; font-weight:750; line-height:1.15; margin-top:9px; font-variant-numeric:tabular-nums;}
-        .correlation-note {color:#5F6B7A; font-size:.84rem; margin-top:6px;}
+        .correlation-value {color:#B42318; font-size:3rem; font-weight:780; line-height:1.1; margin-top:10px; font-variant-numeric:tabular-nums;}
+        .correlation-verdict {color:#111827; font-size:1.18rem; font-weight:720; margin-top:7px;}
+        .correlation-note {color:#5F6B7A; font-size:.88rem; line-height:1.5; margin-top:7px;}
+        .correlation-compare {display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:12px 0;}
+        .correlation-mini {background:#F5F7FA; border-radius:3px; padding:12px 14px;}
+        .correlation-mini-value {color:#334155; font-size:1.55rem; font-weight:740; margin:5px 0 2px; font-variant-numeric:tabular-nums;}
         .correlation-callout {border-left:4px solid #0B5FFF; background:#F5F7FA; padding:12px 16px; color:#334155; margin:8px 0 20px;}
         </style>
         """,
@@ -1338,101 +1436,84 @@ def render_correlation_page() -> None:
     st.markdown(
         f"""
         <div class="correlation-hero">
-          <div class="correlation-title">Rainfall × Nickel Ore Shipments</div>
-          <div class="correlation-subtitle">{summary["analysis_start"]} to {summary["analysis_end"]} · {summary["weeks"]} complete weeks · {summary["ports"]} ports · {summary["regions"]} regions · {summary["status"]}</div>
+          <div class="correlation-title">Rainfall impact on nickel ore shipments</div>
+          <div class="correlation-subtitle">Are wetter months associated with lower shipment volume, and is that relationship changing? · {summary["analysis_start"]} to {summary["analysis_end"]} · {summary["status"]}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     scopes = ["Philippines weighted"] + REGION_ORDER
-    metric_labels = {"Shipment count": "shipments", "Shipment volume": "volume_mt"}
-    analysis_labels = {
-        "De-seasonalized Pearson": "pearson_anomaly",
-        "Raw Pearson": "pearson_raw",
-        "Raw Spearman": "spearman_raw",
-    }
-    filter_scope, filter_metric, filter_analysis = st.columns([1.35, 1, 1.2])
-    with filter_scope:
-        scope = st.selectbox("Region", scopes)
-    with filter_metric:
-        metric_label = st.selectbox("Metric", list(metric_labels))
-    with filter_analysis:
-        analysis_label = st.selectbox("Analysis", list(analysis_labels))
-    metric = metric_labels[metric_label]
-    coefficient = analysis_labels[analysis_label]
-    kpis = correlation_kpis(weekly, scope, metric, coefficient)
+    scope = st.selectbox("Region", scopes)
+    volume_summary = monthly_volume_summary(monthly, scope)
 
-    card_one, card_two, card_three = st.columns(3)
+    card_one, card_two = st.columns([1, 1])
     with card_one:
         st.markdown(
-            f'<div class="correlation-card"><div class="correlation-label">Same-week correlation</div><div class="correlation-value">{kpis["same_week"]:+.3f}</div><div class="correlation-note">{analysis_label}</div></div>',
+            f'''<div class="correlation-card">
+                <div class="correlation-label">Overall monthly correlation</div>
+                <div class="correlation-value">{volume_summary["raw"]:+.3f}</div>
+                <div class="correlation-verdict">{volume_summary["verdict"]}</div>
+                <div class="correlation-note">Wetter months are compared with total monthly shipment volume. Values closer to −1 indicate a stronger negative relationship.</div>
+            </div>''',
             unsafe_allow_html=True,
         )
     with card_two:
-        if kpis["strongest_lag"] is None:
-            lag_value = "No negative lag"
-            lag_note = "Across 0–4 weeks"
-        else:
-            lag_value = f'{kpis["strongest_lag"]} weeks · r = {kpis["strongest_value"]:+.3f}'
-            lag_note = "Strongest negative association"
         st.markdown(
-            f'<div class="correlation-card"><div class="correlation-label">Strongest lag</div><div class="correlation-value">{lag_value}</div><div class="correlation-note">{lag_note}</div></div>',
-            unsafe_allow_html=True,
-        )
-    with card_three:
-        st.markdown(
-            f'<div class="correlation-card"><div class="correlation-label">Coverage</div><div class="correlation-value">{kpis["weeks"]} weeks</div><div class="correlation-note">{kpis["active_weeks"]} active shipment weeks</div></div>',
+            f'''<div class="correlation-card">
+                <div class="correlation-label">What is driving it?</div>
+                <div class="correlation-compare">
+                    <div class="correlation-mini"><div class="correlation-note">Raw monthly</div><div class="correlation-mini-value">{volume_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
+                    <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{volume_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual months</div></div>
+                </div>
+                <div class="correlation-note">{volume_summary["explanation"]}</div>
+            </div>''',
             unsafe_allow_html=True,
         )
 
+    st.markdown("### Rolling 24-month correlation")
+    st.caption(
+        "Each point recalculates Raw Pearson using the latest 24 complete months of rainfall and shipment volume."
+    )
+    st.plotly_chart(
+        build_rolling_monthly_chart(rolling_monthly, scope),
+        use_container_width=True,
+    )
     st.markdown(
-        '<div class="correlation-callout">Primary view removes normal week-of-year seasonality. Negative values indicate that higher rainfall is associated with lower shipments in the compared week.</div>',
+        '<div class="correlation-callout"><b>How to read the trend:</b> movement from −0.50 toward −0.20 means the negative relationship is weakening. Other factors may be becoming more important, but the trend alone cannot identify or prove those factors.</div>',
         unsafe_allow_html=True,
     )
 
+    st.markdown("### Detailed weekly analysis")
+    st.caption(
+        "These charts retain the detailed lag view for shipment volume. The summary above remains the primary decision view."
+    )
     left, right = st.columns([1.05, 1.35])
     with left:
         st.plotly_chart(
-            build_lag_profile_chart(weekly, scope, metric),
+            build_lag_profile_chart(weekly, scope, "volume_mt"),
             use_container_width=True,
         )
     with right:
         st.plotly_chart(
-            build_correlation_heatmap(weekly, metric, coefficient, REGION_ORDER),
+            build_correlation_heatmap(
+                weekly,
+                "volume_mt",
+                "pearson_anomaly",
+                REGION_ORDER,
+            ),
             use_container_width=True,
         )
-
-    monthly_selected = monthly[
-        (monthly["metric"] == metric) & monthly["scope"].isin(scopes)
-    ].copy()
-    monthly_selected["scope"] = pd.Categorical(
-        monthly_selected["scope"], categories=scopes, ordered=True
-    )
-    monthly_selected = monthly_selected.sort_values("scope")
-    monthly_fig = px.bar(
-        monthly_selected,
-        x="scope",
-        y=coefficient,
-        color=coefficient,
-        color_continuous_scale=[CORRELATION_RED, "#F8FAFC", "#B9D8F2"],
-        color_continuous_midpoint=0,
-        text_auto=".3f",
-        title="Monthly robustness check",
-        labels={"scope": "Region", coefficient: "Correlation coefficient"},
-    )
-    monthly_fig.update_traces(textposition="outside", cliponaxis=False)
-    monthly_fig.update_layout(coloraxis_showscale=False)
-    st.plotly_chart(_style_correlation_chart(monthly_fig, 430), use_container_width=True)
 
     with st.expander("Method and interpretation"):
         st.markdown(
             """
-            - Shipment count and shipment volume are each compared with rainfall; they are not correlated with one another here.
+            - The headline compares monthly rainfall with monthly shipment volume using Raw Pearson correlation.
+            - The seasonally adjusted value compares each month with the normal pattern for the same calendar month.
+            - The rolling chart uses the latest 24 complete months at every point.
             - Weekly results use complete Monday–Sunday weeks. Positive lags mean rainfall occurs before the compared shipment week.
             - Regional results are primary because rainfall seasons differ across the Philippines.
             - The national view uses fixed 2021–2025 regional shipment-share weights.
-            - Raw and monthly results describe seasonal association. De-seasonalized Pearson is the primary operational view.
 
             **Correlation does not establish causation.**
             """

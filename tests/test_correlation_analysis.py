@@ -754,6 +754,54 @@ class CorrelationTests(unittest.TestCase):
             {"2024-03-04"},
         )
 
+    def test_rolling_monthly_correlations_use_exact_24_month_windows(self):
+        months = pd.date_range("2022-01-01", periods=30, freq="MS")
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * len(months),
+                "week_start": months,
+                "rain_mm_day": [float((index * 7) % 13) for index in range(30)],
+                "shipments": [index % 5 for index in range(30)],
+                "volume_mt": [float(300 - index * 4 + (index % 3) * 11) for index in range(30)],
+            }
+        )
+
+        result = ca.calculate_rolling_monthly_correlations(
+            panel,
+            window_months=24,
+        )
+
+        self.assertEqual(len(result), 7)
+        self.assertEqual(result.iloc[0]["month"], pd.Timestamp("2023-12-01"))
+        self.assertEqual(result.iloc[-1]["month"], pd.Timestamp("2024-06-01"))
+        self.assertTrue(result["months"].eq(24).all())
+        for offset, row in result.reset_index(drop=True).iterrows():
+            window = panel.iloc[offset:offset + 24]
+            self.assertAlmostEqual(
+                row["pearson_raw"],
+                ca.correlation(window["rain_mm_day"], window["volume_mt"]),
+            )
+
+    def test_rolling_monthly_correlations_return_empty_schema_for_short_history(self):
+        months = pd.date_range("2023-01-01", periods=23, freq="MS")
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * len(months),
+                "week_start": months,
+                "rain_mm_day": range(23),
+                "shipments": range(23),
+                "volume_mt": range(23),
+            }
+        )
+
+        result = ca.calculate_rolling_monthly_correlations(panel)
+
+        self.assertTrue(result.empty)
+        self.assertEqual(
+            list(result.columns),
+            ["scope", "month", "pearson_raw", "months"],
+        )
+
     def test_empty_correlation_tables_keep_provenance_schema(self):
         panel = pd.DataFrame(
             columns=[
@@ -1020,7 +1068,13 @@ class IntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             set(result),
-            {"weekly_lags", "monthly", "coverage", "regional_weights"},
+            {
+                "weekly_lags",
+                "monthly",
+                "rolling_monthly",
+                "coverage",
+                "regional_weights",
+            },
         )
         self.assertEqual(set(result["weekly_lags"]["analysis_end"]), {"2025-01-27"})
 
@@ -1309,7 +1363,7 @@ class IntegrationTests(unittest.TestCase):
                     2021, 2025, cache, ports={"P1": {"region_group": "A"}}
                 )
 
-    def test_export_results_writes_exact_four_filenames(self):
+    def test_export_results_writes_exact_five_filenames(self):
         tables = {
             "weekly_lags": pd.DataFrame(
                 {
@@ -1325,6 +1379,14 @@ class IntegrationTests(unittest.TestCase):
                     "analysis_end": ["2025-03-03"],
                 }
             ),
+            "rolling_monthly": pd.DataFrame(
+                {
+                    "scope": ["Philippines weighted"],
+                    "month": ["2025-03-01"],
+                    "pearson_raw": [-0.4],
+                    "months": [24],
+                }
+            ),
             "coverage": pd.DataFrame({"region_group": ["A"]}),
             "regional_weights": pd.DataFrame({"region_group": ["A"]}),
         }
@@ -1336,14 +1398,15 @@ class IntegrationTests(unittest.TestCase):
                 {
                     "weekly_lag_correlations.csv",
                     "monthly_correlations.csv",
+                    "rolling_monthly_correlations.csv",
                     "coverage.csv",
                     "regional_weights.csv",
                 },
             )
             self.assertEqual(set(paths), set(tables))
-            for key in ("weekly_lags", "monthly"):
+            for key in ("weekly_lags", "monthly", "rolling_monthly"):
                 roundtrip = pd.read_csv(paths[key], dtype=str)
-                assert_frame_equal(roundtrip, tables[key])
+                assert_frame_equal(roundtrip, tables[key].astype(str))
 
     def test_cli_orchestrates_complete_analysis_without_network(self):
         weeks = pd.date_range("2025-01-06", periods=4, freq="W-MON")
@@ -1414,7 +1477,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(captured["output_dir"], Path("out"))
         self.assertEqual(
             set(captured) - {"output_dir"},
-            {"weekly_lags", "monthly", "coverage", "regional_weights"},
+            {
+                "weekly_lags",
+                "monthly",
+                "rolling_monthly",
+                "coverage",
+                "regional_weights",
+            },
         )
         self.assertEqual(set(result["weekly_lags"]["scope"]), {"A", "B", "Philippines weighted"})
         printed = "\n".join(str(call.args[0]) for call in printer.call_args_list)

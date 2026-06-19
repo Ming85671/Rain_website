@@ -261,6 +261,13 @@ MONTHLY_CORRELATION_COLUMNS = [
     "analysis_end",
 ]
 
+ROLLING_MONTHLY_COLUMNS = [
+    "scope",
+    "month",
+    "pearson_raw",
+    "months",
+]
+
 
 def _analysis_window(weeks):
     return weeks.min().strftime("%Y-%m-%d"), weeks.max().strftime("%Y-%m-%d")
@@ -364,8 +371,8 @@ def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
     return pd.DataFrame(rows, columns=WEEKLY_CORRELATION_COLUMNS)
 
 
-def calculate_monthly_correlations(panel):
-    """Calculate region-first raw and month-of-year adjusted correlations."""
+def _aggregate_monthly_panel(panel):
+    """Aggregate a weekly panel to one rainfall and shipment row per month."""
     monthly_source = panel.copy()
     week_start = pd.to_datetime(monthly_source["week_start"], format="mixed")
     monthly_source["week_start"] = week_start
@@ -378,6 +385,12 @@ def calculate_monthly_correlations(panel):
             volume_mt=("volume_mt", lambda values: values.sum(min_count=1)),
         )
     )
+    return monthly, monthly_source
+
+
+def calculate_monthly_correlations(panel):
+    """Calculate region-first raw and month-of-year adjusted correlations."""
+    monthly, monthly_source = _aggregate_monthly_panel(panel)
     monthly["month_of_year"] = monthly["month"].dt.month
     for column in ("rain_mm_day", "shipments", "volume_mt"):
         baseline = monthly.groupby(["region_group", "month_of_year"])[
@@ -414,6 +427,34 @@ def calculate_monthly_correlations(panel):
                 }
             )
     return pd.DataFrame(rows, columns=MONTHLY_CORRELATION_COLUMNS)
+
+
+def calculate_rolling_monthly_correlations(panel, window_months=24):
+    """Calculate rolling raw Pearson correlation for monthly shipment volume."""
+    if not isinstance(window_months, Integral) or isinstance(window_months, bool):
+        raise ValueError("window_months must be an integer >= 2")
+    if window_months < 2:
+        raise ValueError("window_months must be an integer >= 2")
+
+    monthly, _ = _aggregate_monthly_panel(panel)
+    rows = []
+    for scope, group in monthly.groupby("region_group", sort=False):
+        group = group.sort_values("month").reset_index(drop=True)
+        for end in range(window_months - 1, len(group)):
+            window = group.iloc[end - window_months + 1:end + 1]
+            rows.append(
+                {
+                    "scope": scope,
+                    "month": group.loc[end, "month"],
+                    "pearson_raw": correlation(
+                        window["rain_mm_day"], window["volume_mt"]
+                    ),
+                    "months": _pair_count(
+                        window["rain_mm_day"], window["volume_mt"]
+                    ),
+                }
+            )
+    return pd.DataFrame(rows, columns=ROLLING_MONTHLY_COLUMNS)
 
 
 def build_national_panel(regional_panel, weight_panel=None):
@@ -787,9 +828,19 @@ def calculate_correlation_tables(
         ],
         ignore_index=True,
     )
+    rolling_monthly = pd.concat(
+        [
+            calculate_rolling_monthly_correlations(regional_panel),
+            calculate_rolling_monthly_correlations(
+                _national_metric_panel(national_panel, "volume_mt")
+            ),
+        ],
+        ignore_index=True,
+    )
     return {
         "weekly_lags": weekly_lags,
         "monthly": monthly,
+        "rolling_monthly": rolling_monthly,
         "coverage": coverage,
         "regional_weights": regional_weights,
     }
@@ -798,6 +849,7 @@ def calculate_correlation_tables(
 RESULT_FILENAMES = {
     "weekly_lags": "weekly_lag_correlations.csv",
     "monthly": "monthly_correlations.csv",
+    "rolling_monthly": "rolling_monthly_correlations.csv",
     "coverage": "coverage.csv",
     "regional_weights": "regional_weights.csv",
 }

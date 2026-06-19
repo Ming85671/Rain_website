@@ -22,6 +22,14 @@ class CorrelationPageTests(unittest.TestCase):
                 "analysis_end": ["2025-12-22"] * 10,
             }
         )
+        self.rolling = pd.DataFrame(
+            {
+                "scope": ["Philippines weighted"] * 2,
+                "month": ["2025-11-01", "2025-12-01"],
+                "pearson_raw": [-0.45, -0.40],
+                "months": [24, 24],
+            }
+        )
 
     def test_correlation_sidebar_caption_describes_live_complete_week_refresh(self):
         self.assertEqual(
@@ -30,14 +38,16 @@ class CorrelationPageTests(unittest.TestCase):
         )
 
     def test_committed_correlation_outputs_cover_verified_five_year_panel(self):
-        weekly, monthly, coverage, weights = rain.load_correlation_outputs()
+        weekly, monthly, rolling, coverage, weights = rain.load_correlation_outputs()
 
         self.assertEqual(len(weekly), 70)
         self.assertEqual(len(monthly), 14)
+        self.assertEqual(len(rolling), 259)
         self.assertEqual(len(coverage), 6)
         self.assertEqual(len(weights), 6)
         self.assertEqual(set(weekly["analysis_start"]), {"2021-01-04"})
         self.assertEqual(set(weekly["analysis_end"]), {"2025-12-22"})
+        self.assertEqual(set(rolling["months"]), {24})
         self.assertTrue(coverage["weeks"].eq(260).all())
         self.assertEqual(int(coverage["expected_ports"].sum()), 30)
 
@@ -91,7 +101,7 @@ class CorrelationPageTests(unittest.TestCase):
         with patch.object(
             rain,
             "load_live_correlation_outputs",
-            return_value=(self.weekly, monthly, coverage, weights),
+            return_value=(self.weekly, monthly, self.rolling, coverage, weights),
         ):
             result = rain.resolve_correlation_data(
                 {"host": "db.example", "password": "secret"},
@@ -101,6 +111,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(result.source, "live")
         self.assertIsNone(result.warning)
         pd.testing.assert_frame_equal(result.weekly, self.weekly)
+        pd.testing.assert_frame_equal(result.rolling_monthly, self.rolling)
 
     def test_load_live_correlation_outputs_uses_latest_completed_data_week(self):
         shipments = pd.DataFrame(
@@ -115,6 +126,7 @@ class CorrelationPageTests(unittest.TestCase):
         tables = {
             "weekly_lags": self.weekly,
             "monthly": pd.DataFrame(),
+            "rolling_monthly": self.rolling,
             "coverage": pd.DataFrame(),
             "regional_weights": pd.DataFrame(),
         }
@@ -144,6 +156,7 @@ class CorrelationPageTests(unittest.TestCase):
             )
 
         self.assertIs(result[0], self.weekly)
+        self.assertIs(result[2], self.rolling)
         self.assertEqual(load_rain.call_args.args[:2], ("2021-01-01", "2026-06-14"))
         supplied_weeks = calculate.call_args.kwargs["weeks"]
         self.assertEqual(supplied_weeks[-1], pd.Timestamp("2026-06-08"))
@@ -158,6 +171,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(result.source, "fallback")
         self.assertIn("database", result.warning.lower())
         self.assertEqual(set(result.weekly["analysis_end"]), {"2025-12-22"})
+        self.assertEqual(len(result.rolling_monthly), 259)
 
     def test_resolve_correlation_data_sanitizes_live_failure(self):
         with patch.object(
@@ -273,6 +287,60 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(list(heatmap.x), ["0w", "1w", "2w", "3w", "4w"])
         self.assertEqual(list(heatmap.y), ["Surigao-Dinagat-Caraga"])
         self.assertEqual(list(heatmap.z[0]), [0.02, -0.05, -0.25, -0.05, 0.05])
+
+    def test_describe_correlation_uses_plain_english_strength_bands(self):
+        self.assertEqual(
+            rain.describe_correlation(-0.10),
+            "No clear relationship",
+        )
+        self.assertEqual(
+            rain.describe_correlation(-0.30),
+            "Weak negative relationship",
+        )
+        self.assertEqual(
+            rain.describe_correlation(-0.50),
+            "Moderate negative relationship",
+        )
+        self.assertEqual(
+            rain.describe_correlation(-0.70),
+            "Strong negative relationship",
+        )
+
+    def test_monthly_volume_summary_explains_mainly_seasonal_relationship(self):
+        monthly = pd.DataFrame(
+            {
+                "scope": ["Philippines weighted"],
+                "metric": ["volume_mt"],
+                "pearson_raw": [-0.414],
+                "pearson_anomaly": [-0.030],
+            }
+        )
+
+        result = rain.monthly_volume_summary(monthly, "Philippines weighted")
+
+        self.assertEqual(result["raw"], -0.414)
+        self.assertEqual(result["adjusted"], -0.030)
+        self.assertEqual(result["verdict"], "Moderate negative relationship")
+        self.assertIn("mainly reflects the normal wet season", result["explanation"])
+
+    def test_rolling_monthly_chart_uses_selected_scope_and_zero_reference(self):
+        rolling = pd.DataFrame(
+            {
+                "scope": ["A", "A", "B"],
+                "month": ["2025-01-01", "2025-02-01", "2025-02-01"],
+                "pearson_raw": [-0.5, -0.3, 0.1],
+                "months": [24, 24, 24],
+            }
+        )
+
+        figure = rain.build_rolling_monthly_chart(rolling, "A")
+
+        self.assertEqual(list(figure.data[0].x), list(pd.to_datetime(["2025-01-01", "2025-02-01"])))
+        self.assertEqual(list(figure.data[0].y), [-0.5, -0.3])
+        self.assertEqual(figure.data[0].name, "24-month correlation")
+        self.assertTrue(
+            any(shape.y0 == 0 and shape.y1 == 0 for shape in figure.layout.shapes)
+        )
 
 
 if __name__ == "__main__":
