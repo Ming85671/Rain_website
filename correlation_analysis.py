@@ -261,6 +261,18 @@ MONTHLY_CORRELATION_COLUMNS = [
     "analysis_end",
 ]
 
+MONTHLY_LAG_COLUMNS = [
+    "scope",
+    "metric",
+    "rain_leads_months",
+    "pearson_raw",
+    "spearman_raw",
+    "pearson_anomaly",
+    "months",
+    "analysis_start",
+    "analysis_end",
+]
+
 ROLLING_MONTHLY_COLUMNS = [
     "scope",
     "metric",
@@ -429,6 +441,64 @@ def _aggregate_monthly_panel(panel):
         )
     )
     return monthly, monthly_source
+
+
+def calculate_monthly_lag_correlations(
+    panel,
+    max_lag=4,
+):
+    """Calculate correlations where rainfall leads by exact calendar months."""
+    if (
+        isinstance(max_lag, bool)
+        or not isinstance(max_lag, Integral)
+        or max_lag < 0
+    ):
+        raise ValueError("max_lag must be a non-negative integer")
+
+    monthly, monthly_source = _aggregate_monthly_panel(panel)
+    monthly["month_of_year"] = monthly["month"].dt.month
+    for column in ("rain_mm_day", "shipments", "volume_mt"):
+        baseline = monthly.groupby(["region_group", "month_of_year"])[
+            column
+        ].transform("mean")
+        monthly[f"{column}_anomaly"] = monthly[column] - baseline
+
+    rows = []
+    for scope, group in monthly.groupby("region_group", sort=False):
+        group = group.sort_values("month")
+        source_weeks = monthly_source.loc[
+            monthly_source["region_group"].eq(scope), "week_start"
+        ]
+        analysis_start, analysis_end = _analysis_window(source_weeks)
+        for metric in ("shipments", "volume_mt"):
+            metric_by_month = group.set_index("month")[metric]
+            anomaly_by_month = group.set_index("month")[f"{metric}_anomaly"]
+            for lag in range(max_lag + 1):
+                future_months = group["month"] + pd.DateOffset(months=lag)
+                future_metric = metric_by_month.reindex(future_months)
+                future_anomaly = anomaly_by_month.reindex(future_months)
+                rows.append(
+                    {
+                        "scope": scope,
+                        "metric": metric,
+                        "rain_leads_months": lag,
+                        "pearson_raw": correlation(
+                            group["rain_mm_day"], future_metric
+                        ),
+                        "spearman_raw": correlation(
+                            group["rain_mm_day"], future_metric, rank=True
+                        ),
+                        "pearson_anomaly": correlation(
+                            group["rain_mm_day_anomaly"], future_anomaly
+                        ),
+                        "months": _pair_count(
+                            group["rain_mm_day"], future_metric
+                        ),
+                        "analysis_start": analysis_start,
+                        "analysis_end": analysis_end,
+                    }
+                )
+    return pd.DataFrame(rows, columns=MONTHLY_LAG_COLUMNS)
 
 
 def calculate_monthly_correlations(panel):
@@ -622,6 +692,19 @@ def calculate_national_monthly_correlations(national_panel):
         metric_panel = _national_metric_panel(national_panel, metric)
         result = calculate_monthly_correlations(metric_panel)
         rows.append(result[result["metric"] == metric])
+    return pd.concat(rows, ignore_index=True)
+
+
+def calculate_national_monthly_lag_correlations(national_panel, max_lag=4):
+    """Calculate national monthly lags with metric-specific weighted rain."""
+    rows = []
+    for metric in ("shipments", "volume_mt"):
+        metric_panel = _national_metric_panel(national_panel, metric)
+        result = calculate_monthly_lag_correlations(
+            metric_panel,
+            max_lag=max_lag,
+        )
+        rows.append(result[result["metric"].eq(metric)])
     return pd.concat(rows, ignore_index=True)
 
 
@@ -866,6 +949,13 @@ def calculate_correlation_tables(
         ],
         ignore_index=True,
     )
+    monthly_lags = pd.concat(
+        [
+            calculate_monthly_lag_correlations(regional_panel),
+            calculate_national_monthly_lag_correlations(national_panel),
+        ],
+        ignore_index=True,
+    )
     monthly = pd.concat(
         [
             calculate_monthly_correlations(regional_panel),
@@ -900,6 +990,7 @@ def calculate_correlation_tables(
     )
     return {
         "weekly_lags": weekly_lags,
+        "monthly_lags": monthly_lags,
         "monthly": monthly,
         "rolling_monthly": rolling_monthly,
         "rolling_weekly": rolling_weekly,
@@ -910,6 +1001,7 @@ def calculate_correlation_tables(
 
 RESULT_FILENAMES = {
     "weekly_lags": "weekly_lag_correlations.csv",
+    "monthly_lags": "monthly_lag_correlations.csv",
     "monthly": "monthly_correlations.csv",
     "rolling_monthly": "rolling_monthly_correlations.csv",
     "rolling_weekly": "rolling_weekly_correlations.csv",

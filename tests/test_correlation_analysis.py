@@ -805,6 +805,99 @@ class CorrelationTests(unittest.TestCase):
             ["scope", "metric", "month", "pearson_raw", "months"],
         )
 
+    def test_monthly_lag_correlations_use_exact_calendar_months(self):
+        month_periods = pd.period_range("2023-01", periods=24, freq="M")
+        weeks = pd.DatetimeIndex(
+            [
+                period.start_time
+                + pd.Timedelta(days=(-period.start_time.weekday()) % 7)
+                for period in month_periods
+            ]
+        )
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * len(weeks),
+                "week_start": weeks,
+                "rain_mm_day": [
+                    float((index * 7) % 17 + index * 0.1)
+                    for index in range(24)
+                ],
+                "shipments": [index % 6 + index // 8 for index in range(24)],
+                "volume_mt": [
+                    float(900 - index * 9 + (index % 4) * 31)
+                    for index in range(24)
+                ],
+            }
+        )
+
+        result = ca.calculate_monthly_lag_correlations(panel, max_lag=4)
+
+        self.assertEqual(len(result), 10)
+        self.assertEqual(set(result["metric"]), {"shipments", "volume_mt"})
+        self.assertEqual(set(result["rain_leads_months"]), set(range(5)))
+        monthly, _ = ca._aggregate_monthly_panel(panel)
+        monthly["month_of_year"] = monthly["month"].dt.month
+        for column in ("rain_mm_day", "shipments", "volume_mt"):
+            monthly[f"{column}_anomaly"] = monthly[column] - monthly.groupby(
+                "month_of_year"
+            )[column].transform("mean")
+        for metric in ("shipments", "volume_mt"):
+            selected = result[result["metric"].eq(metric)].set_index(
+                "rain_leads_months"
+            )
+            metric_by_month = monthly.set_index("month")[metric]
+            anomaly_by_month = monthly.set_index("month")[f"{metric}_anomaly"]
+            for lag in range(5):
+                future_months = monthly["month"] + pd.DateOffset(months=lag)
+                future_metric = metric_by_month.reindex(future_months)
+                future_anomaly = anomaly_by_month.reindex(future_months)
+                self.assertEqual(selected.loc[lag, "months"], 24 - lag)
+                self.assertAlmostEqual(
+                    selected.loc[lag, "pearson_raw"],
+                    ca.correlation(monthly["rain_mm_day"], future_metric),
+                )
+                self.assertAlmostEqual(
+                    selected.loc[lag, "spearman_raw"],
+                    ca.correlation(
+                        monthly["rain_mm_day"], future_metric, rank=True
+                    ),
+                )
+                self.assertAlmostEqual(
+                    selected.loc[lag, "pearson_anomaly"],
+                    ca.correlation(
+                        monthly["rain_mm_day_anomaly"], future_anomaly
+                    ),
+                )
+
+    def test_monthly_lag_correlations_keep_empty_schema(self):
+        panel = pd.DataFrame(
+            columns=[
+                "region_group",
+                "week_start",
+                "rain_mm_day",
+                "shipments",
+                "volume_mt",
+            ]
+        )
+
+        result = ca.calculate_monthly_lag_correlations(panel)
+
+        self.assertTrue(result.empty)
+        self.assertEqual(
+            list(result.columns),
+            [
+                "scope",
+                "metric",
+                "rain_leads_months",
+                "pearson_raw",
+                "spearman_raw",
+                "pearson_anomaly",
+                "months",
+                "analysis_start",
+                "analysis_end",
+            ],
+        )
+
     def test_rolling_weekly_correlations_use_exact_52_week_windows(self):
         weeks = pd.date_range("2024-01-01", periods=56, freq="W-MON")
         panel = pd.DataFrame(
@@ -1127,6 +1220,7 @@ class IntegrationTests(unittest.TestCase):
             set(result),
             {
                 "weekly_lags",
+                "monthly_lags",
                 "monthly",
                 "rolling_monthly",
                 "rolling_weekly",
@@ -1135,6 +1229,14 @@ class IntegrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(set(result["weekly_lags"]["analysis_end"]), {"2025-01-20"})
+        self.assertEqual(
+            set(result["monthly_lags"]["scope"]),
+            {"A", "Philippines weighted"},
+        )
+        self.assertEqual(
+            set(result["monthly_lags"]["rain_leads_months"]),
+            set(range(5)),
+        )
         self.assertEqual(
             set(result["rolling_weekly"]["scope"]),
             {"A", "Philippines weighted"},
@@ -1430,7 +1532,7 @@ class IntegrationTests(unittest.TestCase):
                     2021, 2025, cache, ports={"P1": {"region_group": "A"}}
                 )
 
-    def test_export_results_writes_exact_six_filenames(self):
+    def test_export_results_writes_exact_seven_filenames(self):
         tables = {
             "weekly_lags": pd.DataFrame(
                 {
@@ -1444,6 +1546,19 @@ class IntegrationTests(unittest.TestCase):
                     "scope": ["Philippines weighted"],
                     "analysis_start": ["2024-01-01"],
                     "analysis_end": ["2025-03-03"],
+                }
+            ),
+            "monthly_lags": pd.DataFrame(
+                {
+                    "scope": ["Philippines weighted"],
+                    "metric": ["shipments"],
+                    "rain_leads_months": [0],
+                    "pearson_raw": [-0.4],
+                    "spearman_raw": [-0.3],
+                    "pearson_anomaly": [-0.1],
+                    "months": [60],
+                    "analysis_start": ["2021-01-04"],
+                    "analysis_end": ["2025-12-22"],
                 }
             ),
             "rolling_monthly": pd.DataFrame(
@@ -1473,6 +1588,7 @@ class IntegrationTests(unittest.TestCase):
                 {path.name for path in Path(directory).glob("*.csv")},
                 {
                     "weekly_lag_correlations.csv",
+                    "monthly_lag_correlations.csv",
                     "monthly_correlations.csv",
                     "rolling_monthly_correlations.csv",
                     "rolling_weekly_correlations.csv",
@@ -1483,6 +1599,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(set(paths), set(tables))
             for key in (
                 "weekly_lags",
+                "monthly_lags",
                 "monthly",
                 "rolling_monthly",
                 "rolling_weekly",
@@ -1561,6 +1678,7 @@ class IntegrationTests(unittest.TestCase):
             set(captured) - {"output_dir"},
             {
                 "weekly_lags",
+                "monthly_lags",
                 "monthly",
                 "rolling_monthly",
                 "rolling_weekly",

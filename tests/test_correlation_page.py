@@ -40,6 +40,19 @@ class CorrelationPageTests(unittest.TestCase):
                 "weeks": [52] * 4,
             }
         )
+        self.monthly_lags = pd.DataFrame(
+            {
+                "scope": ["Philippines weighted"] * 10,
+                "metric": ["shipments"] * 5 + ["volume_mt"] * 5,
+                "rain_leads_months": list(range(5)) * 2,
+                "pearson_raw": [-0.4, -0.3, -0.2, -0.1, 0.0] * 2,
+                "spearman_raw": [-0.3, -0.2, -0.1, 0.0, 0.1] * 2,
+                "pearson_anomaly": [-0.1, -0.2, -0.3, -0.2, -0.1] * 2,
+                "months": [60, 59, 58, 57, 56] * 2,
+                "analysis_start": ["2021-01-04"] * 10,
+                "analysis_end": ["2025-12-22"] * 10,
+            }
+        )
 
     def test_correlation_sidebar_caption_describes_live_complete_week_refresh(self):
         self.assertEqual(
@@ -48,7 +61,15 @@ class CorrelationPageTests(unittest.TestCase):
         )
 
     def test_committed_correlation_outputs_cover_verified_five_year_panel(self):
-        weekly, monthly, rolling, rolling_weekly, coverage, weights = (
+        (
+            weekly,
+            monthly,
+            rolling,
+            rolling_weekly,
+            monthly_lags,
+            coverage,
+            weights,
+        ) = (
             rain.load_correlation_outputs()
         )
 
@@ -64,6 +85,10 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(set(rolling_weekly["weeks"]), {52})
         self.assertEqual(rolling_weekly["week_start"].min(), "2021-12-27")
         self.assertEqual(rolling_weekly["week_start"].max(), "2025-12-22")
+        self.assertEqual(len(monthly_lags), 70)
+        self.assertEqual(set(monthly_lags["metric"]), {"shipments", "volume_mt"})
+        self.assertEqual(set(monthly_lags["rain_leads_months"]), set(range(5)))
+        self.assertEqual(len(set(monthly_lags["scope"])), 7)
         self.assertEqual(len(coverage), 6)
         self.assertEqual(len(weights), 6)
         self.assertEqual(set(weekly["analysis_start"]), {"2021-01-04"})
@@ -127,6 +152,7 @@ class CorrelationPageTests(unittest.TestCase):
                 monthly,
                 self.rolling,
                 self.rolling_weekly,
+                self.monthly_lags,
                 coverage,
                 weights,
             ),
@@ -141,6 +167,7 @@ class CorrelationPageTests(unittest.TestCase):
         pd.testing.assert_frame_equal(result.weekly, self.weekly)
         pd.testing.assert_frame_equal(result.rolling_monthly, self.rolling)
         pd.testing.assert_frame_equal(result.rolling_weekly, self.rolling_weekly)
+        pd.testing.assert_frame_equal(result.monthly_lags, self.monthly_lags)
 
     def test_load_live_correlation_outputs_uses_latest_completed_data_week(self):
         shipments = pd.DataFrame(
@@ -157,6 +184,7 @@ class CorrelationPageTests(unittest.TestCase):
             "monthly": pd.DataFrame(),
             "rolling_monthly": self.rolling,
             "rolling_weekly": self.rolling_weekly,
+            "monthly_lags": self.monthly_lags,
             "coverage": pd.DataFrame(),
             "regional_weights": pd.DataFrame(),
         }
@@ -188,6 +216,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertIs(result[0], self.weekly)
         self.assertIs(result[2], self.rolling)
         self.assertIs(result[3], self.rolling_weekly)
+        self.assertIs(result[4], self.monthly_lags)
         self.assertEqual(load_rain.call_args.args[:2], ("2021-01-01", "2026-06-14"))
         supplied_weeks = calculate.call_args.kwargs["weeks"]
         self.assertEqual(supplied_weeks[-1], pd.Timestamp("2026-06-08"))
@@ -204,6 +233,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(set(result.weekly["analysis_end"]), {"2025-12-22"})
         self.assertEqual(len(result.rolling_monthly), 518)
         self.assertEqual(len(result.rolling_weekly), 2926)
+        self.assertEqual(len(result.monthly_lags), 70)
 
     def test_resolve_correlation_data_sanitizes_live_failure(self):
         with patch.object(
@@ -319,6 +349,53 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(list(heatmap.x), ["0w", "1w", "2w", "3w", "4w"])
         self.assertEqual(list(heatmap.y), ["Surigao-Dinagat-Caraga"])
         self.assertEqual(list(heatmap.z[0]), [0.02, -0.05, -0.25, -0.05, 0.05])
+
+    def test_monthly_lag_profile_uses_month_labels_and_title(self):
+        figure = rain.build_lag_profile_chart(
+            self.monthly_lags,
+            scope="Philippines weighted",
+            metric="shipments",
+            lag_column="rain_leads_months",
+            lag_unit="months",
+            period_label="Monthly",
+        )
+
+        self.assertEqual(list(figure.data[0].x), [0, 1, 2, 3, 4])
+        self.assertEqual(
+            list(figure.data[0].y),
+            [-0.1, -0.2, -0.3, -0.2, -0.1],
+        )
+        self.assertEqual(
+            figure.layout.xaxis.title.text,
+            "Rain leads shipments (months)",
+        )
+        self.assertIn("Rain leads %{x}m", figure.data[0].hovertemplate)
+        self.assertIn("Monthly lag profile", figure.layout.title.text)
+
+    def test_monthly_heatmap_uses_month_labels_and_title(self):
+        monthly_lags = pd.DataFrame(
+            {
+                "scope": ["A"] * 5,
+                "metric": ["shipments"] * 5,
+                "rain_leads_months": list(range(5)),
+                "pearson_anomaly": [-0.1, -0.2, -0.3, -0.2, -0.1],
+            }
+        )
+
+        figure = rain.build_correlation_heatmap(
+            monthly_lags,
+            metric="shipments",
+            coefficient="pearson_anomaly",
+            regions=["A"],
+            lag_column="rain_leads_months",
+            lag_unit="months",
+            period_label="Monthly",
+        )
+
+        heatmap = figure.data[0]
+        self.assertEqual(list(heatmap.x), ["0m", "1m", "2m", "3m", "4m"])
+        self.assertEqual(list(heatmap.z[0]), [-0.1, -0.2, -0.3, -0.2, -0.1])
+        self.assertIn("Monthly regional lag correlation", figure.layout.title.text)
 
     def test_describe_correlation_uses_plain_english_strength_bands(self):
         self.assertEqual(

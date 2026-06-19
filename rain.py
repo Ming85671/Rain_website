@@ -1019,6 +1019,7 @@ class CorrelationPageData:
     monthly: pd.DataFrame
     rolling_monthly: pd.DataFrame
     rolling_weekly: pd.DataFrame
+    monthly_lags: pd.DataFrame
     coverage: pd.DataFrame
     weights: pd.DataFrame
     source: str
@@ -1032,6 +1033,7 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         "monthly_correlations.csv",
         "rolling_monthly_correlations.csv",
         "rolling_weekly_correlations.csv",
+        "monthly_lag_correlations.csv",
         "coverage.csv",
         "regional_weights.csv",
     ]
@@ -1042,13 +1044,29 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         )
 
     tables = [pd.read_csv(data_dir / name) for name in filenames]
-    weekly, monthly, rolling_monthly, rolling_weekly, coverage, weights = tables
-    for frame in [weekly, monthly]:
+    (
+        weekly,
+        monthly,
+        rolling_monthly,
+        rolling_weekly,
+        monthly_lags,
+        coverage,
+        weights,
+    ) = tables
+    for frame in [weekly, monthly, monthly_lags]:
         frame["analysis_start"] = frame["analysis_start"].astype(str)
         frame["analysis_end"] = frame["analysis_end"].astype(str)
     rolling_monthly["month"] = rolling_monthly["month"].astype(str)
     rolling_weekly["week_start"] = rolling_weekly["week_start"].astype(str)
-    return weekly, monthly, rolling_monthly, rolling_weekly, coverage, weights
+    return (
+        weekly,
+        monthly,
+        rolling_monthly,
+        rolling_weekly,
+        monthly_lags,
+        coverage,
+        weights,
+    )
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
@@ -1114,6 +1132,7 @@ def load_live_correlation_outputs(config_items, today_key: str):
         tables["monthly"],
         tables["rolling_monthly"],
         tables["rolling_weekly"],
+        tables["monthly_lags"],
         tables["coverage"],
         tables["regional_weights"],
     )
@@ -1135,6 +1154,7 @@ def resolve_correlation_data(
                 monthly,
                 rolling_monthly,
                 rolling_weekly,
+                monthly_lags,
                 coverage,
                 weights,
             ) = load_live_correlation_outputs(config_items, today_key)
@@ -1143,6 +1163,7 @@ def resolve_correlation_data(
                 monthly,
                 rolling_monthly,
                 rolling_weekly,
+                monthly_lags,
                 coverage,
                 weights,
                 source="live",
@@ -1163,6 +1184,7 @@ def resolve_correlation_data(
         monthly,
         rolling_monthly,
         rolling_weekly,
+        monthly_lags,
         coverage,
         weights,
     ) = load_correlation_outputs()
@@ -1171,6 +1193,7 @@ def resolve_correlation_data(
         monthly,
         rolling_monthly,
         rolling_weekly,
+        monthly_lags,
         coverage,
         weights,
         source="fallback",
@@ -1250,14 +1273,18 @@ def _style_correlation_chart(fig: go.Figure, height: int) -> go.Figure:
 
 
 def build_lag_profile_chart(
-    weekly: pd.DataFrame,
+    lag_data: pd.DataFrame,
     scope: str,
     metric: str,
+    lag_column: str = "rain_leads_weeks",
+    lag_unit: str = "weeks",
+    period_label: str = "Weekly",
 ) -> go.Figure:
     """Compare the three verified coefficients across exact calendar lags."""
-    selected = weekly[
-        (weekly["scope"] == scope) & (weekly["metric"] == metric)
-    ].sort_values("rain_leads_weeks")
+    lag_suffix = "w" if lag_unit == "weeks" else "m"
+    selected = lag_data[
+        (lag_data["scope"] == scope) & (lag_data["metric"] == metric)
+    ].sort_values(lag_column)
     series = [
         ("pearson_anomaly", "De-seasonalized Pearson", CORRELATION_BLUE, "solid"),
         ("pearson_raw", "Raw Pearson", "#64748B", "dot"),
@@ -1267,18 +1294,23 @@ def build_lag_profile_chart(
     for column, label, color, dash in series:
         fig.add_trace(
             go.Scatter(
-                x=selected["rain_leads_weeks"],
+                x=selected[lag_column],
                 y=selected[column],
                 mode="lines+markers",
                 name=label,
                 line=dict(color=color, width=3 if column == "pearson_anomaly" else 1.8, dash=dash),
                 marker=dict(size=7),
-                hovertemplate="Rain leads %{x}w<br>r = %{y:.3f}<extra>" + label + "</extra>",
+                hovertemplate=(
+                    f"Rain leads %{{x}}{lag_suffix}<br>r = %{{y:.3f}}"
+                    f"<extra>{label}</extra>"
+                ),
             )
         )
     metric_name = "Shipment count" if metric == "shipments" else "Shipment volume"
-    fig.update_layout(title=f"Lag profile · {metric_name} · {scope}")
-    fig.update_xaxes(title="Rain leads shipments (weeks)", dtick=1)
+    fig.update_layout(
+        title=f"{period_label} lag profile · {metric_name} · {scope}"
+    )
+    fig.update_xaxes(title=f"Rain leads shipments ({lag_unit})", dtick=1)
     fig.update_yaxes(title="Correlation coefficient", range=[-0.6, 0.3], tickformat=".2f")
     fig.add_hline(y=0, line_width=1, line_color="#94A3B8")
     fig = _style_correlation_chart(fig, 480)
@@ -1291,22 +1323,26 @@ def build_lag_profile_chart(
 
 
 def build_correlation_heatmap(
-    weekly: pd.DataFrame,
+    lag_data: pd.DataFrame,
     metric: str,
     coefficient: str,
     regions: List[str],
+    lag_column: str = "rain_leads_weeks",
+    lag_unit: str = "weeks",
+    period_label: str = "Weekly",
 ) -> go.Figure:
     """Build the signature region-by-lag correlation matrix."""
-    regional = weekly[
-        weekly["scope"].isin(regions) & (weekly["metric"] == metric)
+    lag_suffix = "w" if lag_unit == "weeks" else "m"
+    regional = lag_data[
+        lag_data["scope"].isin(regions) & (lag_data["metric"] == metric)
     ].copy()
     matrix = regional.pivot(
-        index="scope", columns="rain_leads_weeks", values=coefficient
+        index="scope", columns=lag_column, values=coefficient
     ).reindex(index=regions, columns=range(5))
     text = matrix.map(lambda value: "—" if pd.isna(value) else f"{value:.3f}")
     fig = go.Figure(
         data=go.Heatmap(
-            x=[f"{lag}w" for lag in matrix.columns],
+            x=[f"{lag}{lag_suffix}" for lag in matrix.columns],
             y=list(matrix.index),
             z=matrix.to_numpy(),
             text=text.to_numpy(),
@@ -1325,7 +1361,9 @@ def build_correlation_heatmap(
         )
     )
     metric_name = "Shipment count" if metric == "shipments" else "Shipment volume"
-    fig.update_layout(title=f"Regional lag correlation · {metric_name}")
+    fig.update_layout(
+        title=f"{period_label} regional lag correlation · {metric_name}"
+    )
     fig.update_yaxes(autorange="reversed")
     return _style_correlation_chart(fig, 470)
 
@@ -1505,6 +1543,7 @@ def render_correlation_page() -> None:
     monthly = page_data.monthly
     rolling_monthly = page_data.rolling_monthly
     rolling_weekly = page_data.rolling_weekly
+    monthly_lags = page_data.monthly_lags
     coverage = page_data.coverage
     if page_data.warning:
         st.warning(page_data.warning)
@@ -1595,6 +1634,37 @@ def render_correlation_page() -> None:
         unsafe_allow_html=True,
     )
 
+    st.markdown("### Detailed monthly analysis")
+    st.caption(
+        f"These charts show how monthly rainfall relates to {metric_noun} in the same month and up to four months later."
+    )
+    monthly_left, monthly_right = st.columns([1.05, 1.35])
+    with monthly_left:
+        st.plotly_chart(
+            build_lag_profile_chart(
+                monthly_lags,
+                scope,
+                metric,
+                lag_column="rain_leads_months",
+                lag_unit="months",
+                period_label="Monthly",
+            ),
+            use_container_width=True,
+        )
+    with monthly_right:
+        st.plotly_chart(
+            build_correlation_heatmap(
+                monthly_lags,
+                metric,
+                "pearson_anomaly",
+                REGION_ORDER,
+                lag_column="rain_leads_months",
+                lag_unit="months",
+                period_label="Monthly",
+            ),
+            use_container_width=True,
+        )
+
     st.markdown("### Rolling 52-week correlation")
     st.caption(
         f"Each weekly value recalculates Raw Pearson using the latest 52 complete weeks of rainfall and {metric_noun}. Hover over the line for details."
@@ -1636,6 +1706,7 @@ def render_correlation_page() -> None:
             - The headline compares monthly rainfall with monthly {metric_noun} using Raw Pearson correlation.
             - The seasonally adjusted value compares each month with the normal pattern for the same calendar month.
             - The monthly rolling chart uses the latest 24 complete months at every point.
+            - Monthly lag results compare rainfall with shipments in the same month and up to four months later.
             - The weekly rolling chart uses same-week rainfall and shipments over the latest 52 complete weeks. The first 51 weeks do not have enough history for a correlation value.
             - Weekly results use complete Monday–Sunday weeks. Positive lags mean rainfall occurs before the compared shipment week.
             - Regional results are primary because rainfall seasons differ across the Philippines.
