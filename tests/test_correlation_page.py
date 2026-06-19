@@ -24,10 +24,11 @@ class CorrelationPageTests(unittest.TestCase):
         )
         self.rolling = pd.DataFrame(
             {
-                "scope": ["Philippines weighted"] * 2,
-                "month": ["2025-11-01", "2025-12-01"],
-                "pearson_raw": [-0.45, -0.40],
-                "months": [24, 24],
+                "scope": ["Philippines weighted"] * 4,
+                "metric": ["shipments", "shipments", "volume_mt", "volume_mt"],
+                "month": ["2025-11-01", "2025-12-01"] * 2,
+                "pearson_raw": [-0.42, -0.38, -0.45, -0.40],
+                "months": [24] * 4,
             }
         )
 
@@ -42,7 +43,8 @@ class CorrelationPageTests(unittest.TestCase):
 
         self.assertEqual(len(weekly), 70)
         self.assertEqual(len(monthly), 14)
-        self.assertEqual(len(rolling), 259)
+        self.assertEqual(len(rolling), 518)
+        self.assertEqual(set(rolling["metric"]), {"shipments", "volume_mt"})
         self.assertEqual(len(coverage), 6)
         self.assertEqual(len(weights), 6)
         self.assertEqual(set(weekly["analysis_start"]), {"2021-01-04"})
@@ -171,7 +173,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(result.source, "fallback")
         self.assertIn("database", result.warning.lower())
         self.assertEqual(set(result.weekly["analysis_end"]), {"2025-12-22"})
-        self.assertEqual(len(result.rolling_monthly), 259)
+        self.assertEqual(len(result.rolling_monthly), 518)
 
     def test_resolve_correlation_data_sanitizes_live_failure(self):
         with patch.object(
@@ -306,34 +308,49 @@ class CorrelationPageTests(unittest.TestCase):
             "Strong negative relationship",
         )
 
-    def test_monthly_volume_summary_explains_mainly_seasonal_relationship(self):
+    def test_monthly_metric_summary_uses_selected_metric(self):
         monthly = pd.DataFrame(
             {
-                "scope": ["Philippines weighted"],
-                "metric": ["volume_mt"],
-                "pearson_raw": [-0.414],
-                "pearson_anomaly": [-0.030],
+                "scope": ["Philippines weighted"] * 2,
+                "metric": ["shipments", "volume_mt"],
+                "pearson_raw": [-0.500, -0.414],
+                "pearson_anomaly": [-0.250, -0.030],
             }
         )
 
-        result = rain.monthly_volume_summary(monthly, "Philippines weighted")
+        result = rain.monthly_metric_summary(
+            monthly,
+            "Philippines weighted",
+            "shipments",
+        )
 
-        self.assertEqual(result["raw"], -0.414)
-        self.assertEqual(result["adjusted"], -0.030)
+        self.assertEqual(result["raw"], -0.500)
+        self.assertEqual(result["adjusted"], -0.250)
         self.assertEqual(result["verdict"], "Moderate negative relationship")
-        self.assertIn("mainly reflects the normal wet season", result["explanation"])
+        self.assertIn("remains after normal seasonality", result["explanation"])
+
+    def test_correlation_page_title_matches_selected_metric(self):
+        self.assertEqual(
+            rain.correlation_page_title("shipments"),
+            "Rainfall impact on nickel ore shipments",
+        )
+        self.assertEqual(
+            rain.correlation_page_title("volume_mt"),
+            "Rainfall impact on nickel ore volume",
+        )
 
     def test_rolling_monthly_chart_uses_selected_scope_and_zero_reference(self):
         rolling = pd.DataFrame(
             {
-                "scope": ["A", "A", "B"],
-                "month": ["2025-01-01", "2025-02-01", "2025-02-01"],
-                "pearson_raw": [-0.5, -0.3, 0.1],
-                "months": [24, 24, 24],
+                "scope": ["A", "A", "A", "A", "B"],
+                "metric": ["shipments", "shipments", "volume_mt", "volume_mt", "shipments"],
+                "month": ["2025-01-01", "2025-02-01", "2025-01-01", "2025-02-01", "2025-02-01"],
+                "pearson_raw": [-0.5, -0.3, 0.7, 0.6, 0.1],
+                "months": [24] * 5,
             }
         )
 
-        figure = rain.build_rolling_monthly_chart(rolling, "A")
+        figure = rain.build_rolling_monthly_chart(rolling, "A", "shipments")
 
         self.assertEqual(list(figure.data[0].x), list(pd.to_datetime(["2025-01-01", "2025-02-01"])))
         self.assertEqual(list(figure.data[0].y), [-0.5, -0.3])

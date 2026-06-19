@@ -263,6 +263,7 @@ MONTHLY_CORRELATION_COLUMNS = [
 
 ROLLING_MONTHLY_COLUMNS = [
     "scope",
+    "metric",
     "month",
     "pearson_raw",
     "months",
@@ -442,18 +443,20 @@ def calculate_rolling_monthly_correlations(panel, window_months=24):
         group = group.sort_values("month").reset_index(drop=True)
         for end in range(window_months - 1, len(group)):
             window = group.iloc[end - window_months + 1:end + 1]
-            rows.append(
-                {
-                    "scope": scope,
-                    "month": group.loc[end, "month"],
-                    "pearson_raw": correlation(
-                        window["rain_mm_day"], window["volume_mt"]
-                    ),
-                    "months": _pair_count(
-                        window["rain_mm_day"], window["volume_mt"]
-                    ),
-                }
-            )
+            for metric in ("shipments", "volume_mt"):
+                rows.append(
+                    {
+                        "scope": scope,
+                        "metric": metric,
+                        "month": group.loc[end, "month"],
+                        "pearson_raw": correlation(
+                            window["rain_mm_day"], window[metric]
+                        ),
+                        "months": _pair_count(
+                            window["rain_mm_day"], window[metric]
+                        ),
+                    }
+                )
     return pd.DataFrame(rows, columns=ROLLING_MONTHLY_COLUMNS)
 
 
@@ -828,13 +831,14 @@ def calculate_correlation_tables(
         ],
         ignore_index=True,
     )
+    national_rolling = []
+    for metric in ("shipments", "volume_mt"):
+        metric_rolling = calculate_rolling_monthly_correlations(
+            _national_metric_panel(national_panel, metric)
+        )
+        national_rolling.append(metric_rolling[metric_rolling["metric"].eq(metric)])
     rolling_monthly = pd.concat(
-        [
-            calculate_rolling_monthly_correlations(regional_panel),
-            calculate_rolling_monthly_correlations(
-                _national_metric_panel(national_panel, "volume_mt")
-            ),
-        ],
+        [calculate_rolling_monthly_correlations(regional_panel), *national_rolling],
         ignore_index=True,
     )
     return {

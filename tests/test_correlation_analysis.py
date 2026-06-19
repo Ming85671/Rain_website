@@ -771,16 +771,19 @@ class CorrelationTests(unittest.TestCase):
             window_months=24,
         )
 
-        self.assertEqual(len(result), 7)
-        self.assertEqual(result.iloc[0]["month"], pd.Timestamp("2023-12-01"))
-        self.assertEqual(result.iloc[-1]["month"], pd.Timestamp("2024-06-01"))
+        self.assertEqual(len(result), 14)
+        self.assertEqual(set(result["metric"]), {"shipments", "volume_mt"})
         self.assertTrue(result["months"].eq(24).all())
-        for offset, row in result.reset_index(drop=True).iterrows():
-            window = panel.iloc[offset:offset + 24]
-            self.assertAlmostEqual(
-                row["pearson_raw"],
-                ca.correlation(window["rain_mm_day"], window["volume_mt"]),
-            )
+        for metric in ("shipments", "volume_mt"):
+            selected = result[result["metric"].eq(metric)].reset_index(drop=True)
+            self.assertEqual(selected.iloc[0]["month"], pd.Timestamp("2023-12-01"))
+            self.assertEqual(selected.iloc[-1]["month"], pd.Timestamp("2024-06-01"))
+            for offset, row in selected.iterrows():
+                window = panel.iloc[offset:offset + 24]
+                self.assertAlmostEqual(
+                    row["pearson_raw"],
+                    ca.correlation(window["rain_mm_day"], window[metric]),
+                )
 
     def test_rolling_monthly_correlations_return_empty_schema_for_short_history(self):
         months = pd.date_range("2023-01-01", periods=23, freq="MS")
@@ -799,7 +802,7 @@ class CorrelationTests(unittest.TestCase):
         self.assertTrue(result.empty)
         self.assertEqual(
             list(result.columns),
-            ["scope", "month", "pearson_raw", "months"],
+            ["scope", "metric", "month", "pearson_raw", "months"],
         )
 
     def test_empty_correlation_tables_keep_provenance_schema(self):

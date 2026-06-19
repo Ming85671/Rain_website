@@ -115,6 +115,10 @@ CORRELATION_BLUE = "#0B5FFF"
 CORRELATION_TEAL = "#4B9AA6"
 CORRELATION_RED = "#C96A63"
 CORRELATION_SIDEBAR_CAPTION = "Live refresh · complete weeks only"
+CORRELATION_METRICS = {
+    "Shipment count": {"key": "shipments", "noun": "shipment count"},
+    "Shipment volume (mt)": {"key": "volume_mt", "noun": "shipment volume"},
+}
 
 
 # ============================================================
@@ -1255,7 +1259,8 @@ def build_lag_profile_chart(
                 hovertemplate="Rain leads %{x}w<br>r = %{y:.3f}<extra>" + label + "</extra>",
             )
         )
-    fig.update_layout(title=f"Lag profile · {scope}")
+    metric_name = "Shipment count" if metric == "shipments" else "Shipment volume"
+    fig.update_layout(title=f"Lag profile · {metric_name} · {scope}")
     fig.update_xaxes(title="Rain leads shipments (weeks)", dtick=1)
     fig.update_yaxes(title="Correlation coefficient", range=[-0.6, 0.3], tickformat=".2f")
     fig.add_hline(y=0, line_width=1, line_color="#94A3B8")
@@ -1302,7 +1307,8 @@ def build_correlation_heatmap(
             hovertemplate="%{y}<br>Rain leads %{x}<br>r = %{z:.3f}<extra></extra>",
         )
     )
-    fig.update_layout(title="Regional lag correlation")
+    metric_name = "Shipment count" if metric == "shipments" else "Shipment volume"
+    fig.update_layout(title=f"Regional lag correlation · {metric_name}")
     fig.update_yaxes(autorange="reversed")
     return _style_correlation_chart(fig, 470)
 
@@ -1324,30 +1330,44 @@ def describe_correlation(value: float) -> str:
     return f"{strength} {direction} relationship"
 
 
-def monthly_volume_summary(monthly: pd.DataFrame, scope: str) -> Dict[str, Any]:
-    """Summarize raw and seasonally adjusted monthly volume correlations."""
+def correlation_page_title(metric: str) -> str:
+    """Return the exact page title for the selected shipment metric."""
+    if metric == "shipments":
+        return "Rainfall impact on nickel ore shipments"
+    if metric == "volume_mt":
+        return "Rainfall impact on nickel ore volume"
+    raise ValueError(f"Unsupported correlation metric: {metric}")
+
+
+def monthly_metric_summary(
+    monthly: pd.DataFrame,
+    scope: str,
+    metric: str,
+) -> Dict[str, Any]:
+    """Summarize raw and seasonally adjusted monthly correlations."""
     selected = monthly[
-        monthly["scope"].eq(scope) & monthly["metric"].eq("volume_mt")
+        monthly["scope"].eq(scope) & monthly["metric"].eq(metric)
     ]
     if len(selected) != 1:
-        raise ValueError(f"Expected one monthly volume row for {scope}")
+        raise ValueError(f"Expected one monthly {metric} row for {scope}")
     row = selected.iloc[0]
     raw = float(row["pearson_raw"])
     adjusted = float(row["pearson_anomaly"])
+    noun = "shipment count" if metric == "shipments" else "shipment volume"
     if raw <= -0.20 and abs(adjusted) < 0.20:
         explanation = (
             "The overall negative relationship mainly reflects the normal wet season. "
-            "Unusually wet months do not show a clear additional relationship with shipment volume."
+            f"Unusually wet months do not show a clear additional relationship with {noun}."
         )
     elif raw <= -0.20 and adjusted <= -0.20:
         explanation = (
             "The negative relationship remains after normal seasonality is removed, "
-            "so unusually wet months are also associated with lower shipment volume."
+            f"so unusually wet months are also associated with lower {noun}."
         )
     else:
         explanation = (
             "The monthly data does not show a clear overall negative relationship "
-            "between rainfall and shipment volume."
+            f"between rainfall and {noun}."
         )
     return {
         "raw": raw,
@@ -1360,9 +1380,13 @@ def monthly_volume_summary(monthly: pd.DataFrame, scope: str) -> Dict[str, Any]:
 def build_rolling_monthly_chart(
     rolling_monthly: pd.DataFrame,
     scope: str,
+    metric: str,
 ) -> go.Figure:
     """Plot the selected scope's rolling 24-month raw Pearson correlation."""
-    selected = rolling_monthly[rolling_monthly["scope"].eq(scope)].copy()
+    selected = rolling_monthly[
+        rolling_monthly["scope"].eq(scope)
+        & rolling_monthly["metric"].eq(metric)
+    ].copy()
     selected["month"] = pd.to_datetime(selected["month"], errors="coerce")
     selected = selected.dropna(subset=["month", "pearson_raw"]).sort_values("month")
     fig = go.Figure()
@@ -1433,28 +1457,38 @@ def render_correlation_page() -> None:
         unsafe_allow_html=True,
     )
 
-    st.markdown(
+    hero = st.empty()
+    scopes = ["Philippines weighted"] + REGION_ORDER
+    filter_scope, filter_metric = st.columns([1.2, 1])
+    with filter_scope:
+        scope = st.selectbox("Region", scopes)
+    with filter_metric:
+        metric_label = st.selectbox(
+            "Metric",
+            list(CORRELATION_METRICS),
+            index=1,
+        )
+    metric = CORRELATION_METRICS[metric_label]["key"]
+    metric_noun = CORRELATION_METRICS[metric_label]["noun"]
+    metric_summary = monthly_metric_summary(monthly, scope, metric)
+    hero.markdown(
         f"""
         <div class="correlation-hero">
-          <div class="correlation-title">Rainfall impact on nickel ore shipments</div>
-          <div class="correlation-subtitle">Are wetter months associated with lower shipment volume, and is that relationship changing? · {summary["analysis_start"]} to {summary["analysis_end"]} · {summary["status"]}</div>
+          <div class="correlation-title">{correlation_page_title(metric)}</div>
+          <div class="correlation-subtitle">Are wetter months associated with lower {metric_noun}, and is that relationship changing? · {summary["analysis_start"]} to {summary["analysis_end"]} · {summary["status"]}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    scopes = ["Philippines weighted"] + REGION_ORDER
-    scope = st.selectbox("Region", scopes)
-    volume_summary = monthly_volume_summary(monthly, scope)
 
     card_one, card_two = st.columns([1, 1])
     with card_one:
         st.markdown(
             f'''<div class="correlation-card">
                 <div class="correlation-label">Overall monthly correlation</div>
-                <div class="correlation-value">{volume_summary["raw"]:+.3f}</div>
-                <div class="correlation-verdict">{volume_summary["verdict"]}</div>
-                <div class="correlation-note">Wetter months are compared with total monthly shipment volume. Values closer to −1 indicate a stronger negative relationship.</div>
+                <div class="correlation-value">{metric_summary["raw"]:+.3f}</div>
+                <div class="correlation-verdict">{metric_summary["verdict"]}</div>
+                <div class="correlation-note">Wetter months are compared with total monthly {metric_noun}. Values closer to −1 indicate a stronger negative relationship.</div>
             </div>''',
             unsafe_allow_html=True,
         )
@@ -1463,20 +1497,20 @@ def render_correlation_page() -> None:
             f'''<div class="correlation-card">
                 <div class="correlation-label">What is driving it?</div>
                 <div class="correlation-compare">
-                    <div class="correlation-mini"><div class="correlation-note">Raw monthly</div><div class="correlation-mini-value">{volume_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
-                    <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{volume_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual months</div></div>
+                    <div class="correlation-mini"><div class="correlation-note">Raw monthly</div><div class="correlation-mini-value">{metric_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
+                    <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{metric_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual months</div></div>
                 </div>
-                <div class="correlation-note">{volume_summary["explanation"]}</div>
+                <div class="correlation-note">{metric_summary["explanation"]}</div>
             </div>''',
             unsafe_allow_html=True,
         )
 
     st.markdown("### Rolling 24-month correlation")
     st.caption(
-        "Each point recalculates Raw Pearson using the latest 24 complete months of rainfall and shipment volume."
+        f"Each point recalculates Raw Pearson using the latest 24 complete months of rainfall and {metric_noun}."
     )
     st.plotly_chart(
-        build_rolling_monthly_chart(rolling_monthly, scope),
+        build_rolling_monthly_chart(rolling_monthly, scope, metric),
         use_container_width=True,
     )
     st.markdown(
@@ -1486,19 +1520,19 @@ def render_correlation_page() -> None:
 
     st.markdown("### Detailed weekly analysis")
     st.caption(
-        "These charts retain the detailed lag view for shipment volume. The summary above remains the primary decision view."
+        f"These charts retain the detailed lag view for {metric_noun}. The summary above remains the primary decision view."
     )
     left, right = st.columns([1.05, 1.35])
     with left:
         st.plotly_chart(
-            build_lag_profile_chart(weekly, scope, "volume_mt"),
+            build_lag_profile_chart(weekly, scope, metric),
             use_container_width=True,
         )
     with right:
         st.plotly_chart(
             build_correlation_heatmap(
                 weekly,
-                "volume_mt",
+                metric,
                 "pearson_anomaly",
                 REGION_ORDER,
             ),
@@ -1507,8 +1541,8 @@ def render_correlation_page() -> None:
 
     with st.expander("Method and interpretation"):
         st.markdown(
-            """
-            - The headline compares monthly rainfall with monthly shipment volume using Raw Pearson correlation.
+            f"""
+            - The headline compares monthly rainfall with monthly {metric_noun} using Raw Pearson correlation.
             - The seasonally adjusted value compares each month with the normal pattern for the same calendar month.
             - The rolling chart uses the latest 24 complete months at every point.
             - Weekly results use complete Monday–Sunday weeks. Positive lags mean rainfall occurs before the compared shipment week.
