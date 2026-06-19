@@ -31,6 +31,15 @@ class CorrelationPageTests(unittest.TestCase):
                 "months": [24] * 4,
             }
         )
+        self.rolling_weekly = pd.DataFrame(
+            {
+                "scope": ["Philippines weighted"] * 4,
+                "metric": ["shipments", "shipments", "volume_mt", "volume_mt"],
+                "week_start": ["2025-12-15", "2025-12-22"] * 2,
+                "pearson_raw": [-0.32, -0.30, -0.41, -0.39],
+                "weeks": [52] * 4,
+            }
+        )
 
     def test_correlation_sidebar_caption_describes_live_complete_week_refresh(self):
         self.assertEqual(
@@ -39,12 +48,22 @@ class CorrelationPageTests(unittest.TestCase):
         )
 
     def test_committed_correlation_outputs_cover_verified_five_year_panel(self):
-        weekly, monthly, rolling, coverage, weights = rain.load_correlation_outputs()
+        weekly, monthly, rolling, rolling_weekly, coverage, weights = (
+            rain.load_correlation_outputs()
+        )
 
         self.assertEqual(len(weekly), 70)
         self.assertEqual(len(monthly), 14)
         self.assertEqual(len(rolling), 518)
         self.assertEqual(set(rolling["metric"]), {"shipments", "volume_mt"})
+        self.assertEqual(len(rolling_weekly), 2926)
+        self.assertEqual(
+            set(rolling_weekly["metric"]),
+            {"shipments", "volume_mt"},
+        )
+        self.assertEqual(set(rolling_weekly["weeks"]), {52})
+        self.assertEqual(rolling_weekly["week_start"].min(), "2021-12-27")
+        self.assertEqual(rolling_weekly["week_start"].max(), "2025-12-22")
         self.assertEqual(len(coverage), 6)
         self.assertEqual(len(weights), 6)
         self.assertEqual(set(weekly["analysis_start"]), {"2021-01-04"})
@@ -103,7 +122,14 @@ class CorrelationPageTests(unittest.TestCase):
         with patch.object(
             rain,
             "load_live_correlation_outputs",
-            return_value=(self.weekly, monthly, self.rolling, coverage, weights),
+            return_value=(
+                self.weekly,
+                monthly,
+                self.rolling,
+                self.rolling_weekly,
+                coverage,
+                weights,
+            ),
         ):
             result = rain.resolve_correlation_data(
                 {"host": "db.example", "password": "secret"},
@@ -114,6 +140,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertIsNone(result.warning)
         pd.testing.assert_frame_equal(result.weekly, self.weekly)
         pd.testing.assert_frame_equal(result.rolling_monthly, self.rolling)
+        pd.testing.assert_frame_equal(result.rolling_weekly, self.rolling_weekly)
 
     def test_load_live_correlation_outputs_uses_latest_completed_data_week(self):
         shipments = pd.DataFrame(
@@ -129,6 +156,7 @@ class CorrelationPageTests(unittest.TestCase):
             "weekly_lags": self.weekly,
             "monthly": pd.DataFrame(),
             "rolling_monthly": self.rolling,
+            "rolling_weekly": self.rolling_weekly,
             "coverage": pd.DataFrame(),
             "regional_weights": pd.DataFrame(),
         }
@@ -159,6 +187,7 @@ class CorrelationPageTests(unittest.TestCase):
 
         self.assertIs(result[0], self.weekly)
         self.assertIs(result[2], self.rolling)
+        self.assertIs(result[3], self.rolling_weekly)
         self.assertEqual(load_rain.call_args.args[:2], ("2021-01-01", "2026-06-14"))
         supplied_weeks = calculate.call_args.kwargs["weeks"]
         self.assertEqual(supplied_weeks[-1], pd.Timestamp("2026-06-08"))
@@ -174,6 +203,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertIn("database", result.warning.lower())
         self.assertEqual(set(result.weekly["analysis_end"]), {"2025-12-22"})
         self.assertEqual(len(result.rolling_monthly), 518)
+        self.assertEqual(len(result.rolling_weekly), 2926)
 
     def test_resolve_correlation_data_sanitizes_live_failure(self):
         with patch.object(
@@ -355,6 +385,54 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(list(figure.data[0].x), list(pd.to_datetime(["2025-01-01", "2025-02-01"])))
         self.assertEqual(list(figure.data[0].y), [-0.5, -0.3])
         self.assertEqual(figure.data[0].name, "24-month correlation")
+        self.assertTrue(
+            any(shape.y0 == 0 and shape.y1 == 0 for shape in figure.layout.shapes)
+        )
+
+    def test_rolling_weekly_chart_filters_metric_and_has_line_only_hover(self):
+        rolling = pd.DataFrame(
+            {
+                "scope": ["A", "A", "A", "A", "B"],
+                "metric": [
+                    "shipments",
+                    "shipments",
+                    "volume_mt",
+                    "volume_mt",
+                    "shipments",
+                ],
+                "week_start": [
+                    "2021-12-27",
+                    "2022-01-03",
+                    "2021-12-27",
+                    "2022-01-03",
+                    "2022-01-03",
+                ],
+                "pearson_raw": [-0.5, -0.3, 0.7, 0.6, 0.1],
+                "weeks": [52] * 5,
+            }
+        )
+
+        figure = rain.build_rolling_weekly_chart(
+            rolling,
+            "A",
+            "shipments",
+            "Shipment count",
+        )
+
+        trace = figure.data[0]
+        self.assertEqual(
+            list(trace.x),
+            list(pd.to_datetime(["2021-12-27", "2022-01-03"])),
+        )
+        self.assertEqual(list(trace.y), [-0.5, -0.3])
+        self.assertEqual(trace.mode, "lines")
+        self.assertNotIn("markers", trace.mode)
+        self.assertIn("Region: %{customdata[0]}", trace.hovertemplate)
+        self.assertIn("Metric: %{customdata[1]}", trace.hovertemplate)
+        self.assertIn("Correlation: %{y:.3f}", trace.hovertemplate)
+        self.assertIn("%{customdata[2]} complete weeks", trace.hovertemplate)
+        self.assertEqual(pd.Timestamp(figure.layout.xaxis.range[0]), pd.Timestamp("2021-01-04"))
+        self.assertEqual(pd.Timestamp(figure.layout.xaxis.range[1]), pd.Timestamp("2022-01-03"))
         self.assertTrue(
             any(shape.y0 == 0 and shape.y1 == 0 for shape in figure.layout.shapes)
         )

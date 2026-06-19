@@ -805,6 +805,60 @@ class CorrelationTests(unittest.TestCase):
             ["scope", "metric", "month", "pearson_raw", "months"],
         )
 
+    def test_rolling_weekly_correlations_use_exact_52_week_windows(self):
+        weeks = pd.date_range("2024-01-01", periods=56, freq="W-MON")
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * len(weeks),
+                "week_start": weeks,
+                "rain_mm_day": [float((index * 7) % 13) for index in range(56)],
+                "shipments": [index % 5 for index in range(56)],
+                "volume_mt": [
+                    float(700 - index * 4 + (index % 3) * 11)
+                    for index in range(56)
+                ],
+            }
+        )
+
+        result = ca.calculate_rolling_weekly_correlations(
+            panel,
+            window_weeks=52,
+        )
+
+        self.assertEqual(len(result), 10)
+        self.assertEqual(set(result["metric"]), {"shipments", "volume_mt"})
+        self.assertTrue(result["weeks"].eq(52).all())
+        for metric in ("shipments", "volume_mt"):
+            selected = result[result["metric"].eq(metric)].reset_index(drop=True)
+            self.assertEqual(selected.iloc[0]["week_start"], weeks[51])
+            self.assertEqual(selected.iloc[-1]["week_start"], weeks[-1])
+            for offset, row in selected.iterrows():
+                window = panel.iloc[offset:offset + 52]
+                self.assertAlmostEqual(
+                    row["pearson_raw"],
+                    ca.correlation(window["rain_mm_day"], window[metric]),
+                )
+
+    def test_rolling_weekly_correlations_return_empty_schema_for_short_history(self):
+        weeks = pd.date_range("2024-01-01", periods=51, freq="W-MON")
+        panel = pd.DataFrame(
+            {
+                "region_group": ["A"] * len(weeks),
+                "week_start": weeks,
+                "rain_mm_day": range(51),
+                "shipments": range(51),
+                "volume_mt": range(51),
+            }
+        )
+
+        result = ca.calculate_rolling_weekly_correlations(panel)
+
+        self.assertTrue(result.empty)
+        self.assertEqual(
+            list(result.columns),
+            ["scope", "metric", "week_start", "pearson_raw", "weeks"],
+        )
+
     def test_empty_correlation_tables_keep_provenance_schema(self):
         panel = pd.DataFrame(
             columns=[
@@ -1039,13 +1093,13 @@ class IntegrationTests(unittest.TestCase):
             ca.latest_analysis_week(shipments, today="2026-06-19")
 
     def test_calculate_correlation_tables_orchestrates_dataframe_inputs(self):
-        weeks = pd.date_range("2025-01-06", periods=4, freq="W-MON")
+        weeks = pd.date_range("2024-01-01", periods=56, freq="W-MON")
         shipments = pd.DataFrame(
             {
-                "load_port": ["P1"] * 4,
+                "load_port": ["P1"] * len(weeks),
                 "load_start_date": weeks,
-                "vsl_name": ["a", "b", "c", "d"],
-                "voy_intake_mt": [10, 20, 30, 40],
+                "vsl_name": [f"vessel-{index}" for index in range(len(weeks))],
+                "voy_intake_mt": [100 + index for index in range(len(weeks))],
             }
         )
         rainfall = pd.DataFrame(
@@ -1075,11 +1129,21 @@ class IntegrationTests(unittest.TestCase):
                 "weekly_lags",
                 "monthly",
                 "rolling_monthly",
+                "rolling_weekly",
                 "coverage",
                 "regional_weights",
             },
         )
-        self.assertEqual(set(result["weekly_lags"]["analysis_end"]), {"2025-01-27"})
+        self.assertEqual(set(result["weekly_lags"]["analysis_end"]), {"2025-01-20"})
+        self.assertEqual(
+            set(result["rolling_weekly"]["scope"]),
+            {"A", "Philippines weighted"},
+        )
+        self.assertEqual(
+            set(result["rolling_weekly"]["metric"]),
+            {"shipments", "volume_mt"},
+        )
+        self.assertTrue(result["rolling_weekly"]["weeks"].eq(52).all())
 
     def test_calculate_correlation_tables_reflects_shipment_and_volume_updates(self):
         weeks = pd.date_range("2025-01-06", periods=20, freq="W-MON")
@@ -1366,7 +1430,7 @@ class IntegrationTests(unittest.TestCase):
                     2021, 2025, cache, ports={"P1": {"region_group": "A"}}
                 )
 
-    def test_export_results_writes_exact_five_filenames(self):
+    def test_export_results_writes_exact_six_filenames(self):
         tables = {
             "weekly_lags": pd.DataFrame(
                 {
@@ -1390,6 +1454,15 @@ class IntegrationTests(unittest.TestCase):
                     "months": [24],
                 }
             ),
+            "rolling_weekly": pd.DataFrame(
+                {
+                    "scope": ["Philippines weighted"],
+                    "metric": ["shipments"],
+                    "week_start": ["2025-03-03"],
+                    "pearson_raw": [-0.3],
+                    "weeks": [52],
+                }
+            ),
             "coverage": pd.DataFrame({"region_group": ["A"]}),
             "regional_weights": pd.DataFrame({"region_group": ["A"]}),
         }
@@ -1402,12 +1475,18 @@ class IntegrationTests(unittest.TestCase):
                     "weekly_lag_correlations.csv",
                     "monthly_correlations.csv",
                     "rolling_monthly_correlations.csv",
+                    "rolling_weekly_correlations.csv",
                     "coverage.csv",
                     "regional_weights.csv",
                 },
             )
             self.assertEqual(set(paths), set(tables))
-            for key in ("weekly_lags", "monthly", "rolling_monthly"):
+            for key in (
+                "weekly_lags",
+                "monthly",
+                "rolling_monthly",
+                "rolling_weekly",
+            ):
                 roundtrip = pd.read_csv(paths[key], dtype=str)
                 assert_frame_equal(roundtrip, tables[key].astype(str))
 
@@ -1484,6 +1563,7 @@ class IntegrationTests(unittest.TestCase):
                 "weekly_lags",
                 "monthly",
                 "rolling_monthly",
+                "rolling_weekly",
                 "coverage",
                 "regional_weights",
             },

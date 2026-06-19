@@ -1018,6 +1018,7 @@ class CorrelationPageData:
     weekly: pd.DataFrame
     monthly: pd.DataFrame
     rolling_monthly: pd.DataFrame
+    rolling_weekly: pd.DataFrame
     coverage: pd.DataFrame
     weights: pd.DataFrame
     source: str
@@ -1030,6 +1031,7 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         "weekly_lag_correlations.csv",
         "monthly_correlations.csv",
         "rolling_monthly_correlations.csv",
+        "rolling_weekly_correlations.csv",
         "coverage.csv",
         "regional_weights.csv",
     ]
@@ -1040,12 +1042,13 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         )
 
     tables = [pd.read_csv(data_dir / name) for name in filenames]
-    weekly, monthly, rolling_monthly, coverage, weights = tables
+    weekly, monthly, rolling_monthly, rolling_weekly, coverage, weights = tables
     for frame in [weekly, monthly]:
         frame["analysis_start"] = frame["analysis_start"].astype(str)
         frame["analysis_end"] = frame["analysis_end"].astype(str)
     rolling_monthly["month"] = rolling_monthly["month"].astype(str)
-    return weekly, monthly, rolling_monthly, coverage, weights
+    rolling_weekly["week_start"] = rolling_weekly["week_start"].astype(str)
+    return weekly, monthly, rolling_monthly, rolling_weekly, coverage, weights
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
@@ -1110,6 +1113,7 @@ def load_live_correlation_outputs(config_items, today_key: str):
         tables["weekly_lags"],
         tables["monthly"],
         tables["rolling_monthly"],
+        tables["rolling_weekly"],
         tables["coverage"],
         tables["regional_weights"],
     )
@@ -1126,14 +1130,19 @@ def resolve_correlation_data(
     if database_config:
         try:
             config_items = tuple(sorted(dict(database_config).items()))
-            weekly, monthly, rolling_monthly, coverage, weights = load_live_correlation_outputs(
-                config_items,
-                today_key,
-            )
+            (
+                weekly,
+                monthly,
+                rolling_monthly,
+                rolling_weekly,
+                coverage,
+                weights,
+            ) = load_live_correlation_outputs(config_items, today_key)
             return CorrelationPageData(
                 weekly,
                 monthly,
                 rolling_monthly,
+                rolling_weekly,
                 coverage,
                 weights,
                 source="live",
@@ -1149,11 +1158,19 @@ def resolve_correlation_data(
             "Showing the verified snapshot instead."
         )
 
-    weekly, monthly, rolling_monthly, coverage, weights = load_correlation_outputs()
+    (
+        weekly,
+        monthly,
+        rolling_monthly,
+        rolling_weekly,
+        coverage,
+        weights,
+    ) = load_correlation_outputs()
     return CorrelationPageData(
         weekly,
         monthly,
         rolling_monthly,
+        rolling_weekly,
         coverage,
         weights,
         source="fallback",
@@ -1418,6 +1435,65 @@ def build_rolling_monthly_chart(
     return _style_correlation_chart(fig, 410)
 
 
+def build_rolling_weekly_chart(
+    rolling_weekly: pd.DataFrame,
+    scope: str,
+    metric: str,
+    metric_label: str,
+) -> go.Figure:
+    """Plot the selected scope's line-only 52-week Raw Pearson trend."""
+    selected = rolling_weekly[
+        rolling_weekly["scope"].eq(scope)
+        & rolling_weekly["metric"].eq(metric)
+    ].copy()
+    selected["week_start"] = pd.to_datetime(
+        selected["week_start"], errors="coerce"
+    )
+    selected = selected.dropna(
+        subset=["week_start", "pearson_raw"]
+    ).sort_values("week_start")
+    fig = go.Figure()
+    if selected.empty:
+        fig.add_annotation(
+            text="At least 52 complete weeks are required.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font=dict(color="#5F6B7A", size=14),
+        )
+    else:
+        hover_data = selected[["scope", "weeks"]].copy()
+        hover_data.insert(1, "metric_label", metric_label)
+        fig.add_trace(
+            go.Scatter(
+                x=selected["week_start"],
+                y=selected["pearson_raw"],
+                customdata=hover_data,
+                mode="lines",
+                name="52-week correlation",
+                line=dict(color=CORRELATION_RED, width=2.5),
+                hovertemplate=(
+                    "Week of %{x|%Y-%m-%d}"
+                    "<br>Region: %{customdata[0]}"
+                    "<br>Metric: %{customdata[1]}"
+                    "<br>Correlation: %{y:.3f}"
+                    "<br>Window: %{customdata[2]} complete weeks"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        analysis_start = selected["week_start"].min() - pd.Timedelta(weeks=51)
+        fig.update_xaxes(
+            range=[analysis_start, selected["week_start"].max()]
+        )
+    fig.add_hline(y=0, line_width=1.5, line_dash="dash", line_color="#94A3B8")
+    fig.update_xaxes(title="52-week window ending")
+    fig.update_yaxes(title="Raw Pearson correlation", tickformat=".2f")
+    return _style_correlation_chart(fig, 410)
+
+
 def render_correlation_page() -> None:
     try:
         database_config = dict(st.secrets["database"])
@@ -1428,6 +1504,7 @@ def render_correlation_page() -> None:
     weekly = page_data.weekly
     monthly = page_data.monthly
     rolling_monthly = page_data.rolling_monthly
+    rolling_weekly = page_data.rolling_weekly
     coverage = page_data.coverage
     if page_data.warning:
         st.warning(page_data.warning)
@@ -1518,6 +1595,20 @@ def render_correlation_page() -> None:
         unsafe_allow_html=True,
     )
 
+    st.markdown("### Rolling 52-week correlation")
+    st.caption(
+        f"Each weekly value recalculates Raw Pearson using the latest 52 complete weeks of rainfall and {metric_noun}. Hover over the line for details."
+    )
+    st.plotly_chart(
+        build_rolling_weekly_chart(
+            rolling_weekly,
+            scope,
+            metric,
+            metric_label,
+        ),
+        use_container_width=True,
+    )
+
     st.markdown("### Detailed weekly analysis")
     st.caption(
         f"These charts retain the detailed lag view for {metric_noun}. The summary above remains the primary decision view."
@@ -1544,7 +1635,8 @@ def render_correlation_page() -> None:
             f"""
             - The headline compares monthly rainfall with monthly {metric_noun} using Raw Pearson correlation.
             - The seasonally adjusted value compares each month with the normal pattern for the same calendar month.
-            - The rolling chart uses the latest 24 complete months at every point.
+            - The monthly rolling chart uses the latest 24 complete months at every point.
+            - The weekly rolling chart uses same-week rainfall and shipments over the latest 52 complete weeks. The first 51 weeks do not have enough history for a correlation value.
             - Weekly results use complete Monday–Sunday weeks. Positive lags mean rainfall occurs before the compared shipment week.
             - Regional results are primary because rainfall seasons differ across the Philippines.
             - The national view uses fixed 2021–2025 regional shipment-share weights.

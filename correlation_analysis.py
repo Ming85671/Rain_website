@@ -269,6 +269,14 @@ ROLLING_MONTHLY_COLUMNS = [
     "months",
 ]
 
+ROLLING_WEEKLY_COLUMNS = [
+    "scope",
+    "metric",
+    "week_start",
+    "pearson_raw",
+    "weeks",
+]
+
 
 def _analysis_window(weeks):
     return weeks.min().strftime("%Y-%m-%d"), weeks.max().strftime("%Y-%m-%d")
@@ -370,6 +378,40 @@ def calculate_lag_correlations(panel, scope_column="region_group", max_lag=4):
                     }
                 )
     return pd.DataFrame(rows, columns=WEEKLY_CORRELATION_COLUMNS)
+
+
+def calculate_rolling_weekly_correlations(
+    panel,
+    scope_column="region_group",
+    window_weeks=52,
+):
+    """Calculate trailing raw Pearson correlation for complete weekly windows."""
+    if not isinstance(window_weeks, Integral) or isinstance(window_weeks, bool):
+        raise ValueError("window_weeks must be an integer >= 2")
+    if window_weeks < 2:
+        raise ValueError("window_weeks must be an integer >= 2")
+
+    panel = _validated_lag_panel(panel, scope_column)
+    rows = []
+    for scope, group in panel.groupby(scope_column, sort=False):
+        group = group.sort_values("week_start").reset_index(drop=True)
+        for end in range(window_weeks - 1, len(group)):
+            window = group.iloc[end - window_weeks + 1:end + 1]
+            for metric in ("shipments", "volume_mt"):
+                rows.append(
+                    {
+                        "scope": scope,
+                        "metric": metric,
+                        "week_start": group.loc[end, "week_start"],
+                        "pearson_raw": correlation(
+                            window["rain_mm_day"], window[metric]
+                        ),
+                        "weeks": _pair_count(
+                            window["rain_mm_day"], window[metric]
+                        ),
+                    }
+                )
+    return pd.DataFrame(rows, columns=ROLLING_WEEKLY_COLUMNS)
 
 
 def _aggregate_monthly_panel(panel):
@@ -841,10 +883,26 @@ def calculate_correlation_tables(
         [calculate_rolling_monthly_correlations(regional_panel), *national_rolling],
         ignore_index=True,
     )
+    national_rolling_weekly = []
+    for metric in ("shipments", "volume_mt"):
+        metric_rolling = calculate_rolling_weekly_correlations(
+            _national_metric_panel(national_panel, metric)
+        )
+        national_rolling_weekly.append(
+            metric_rolling[metric_rolling["metric"].eq(metric)]
+        )
+    rolling_weekly = pd.concat(
+        [
+            calculate_rolling_weekly_correlations(regional_panel),
+            *national_rolling_weekly,
+        ],
+        ignore_index=True,
+    )
     return {
         "weekly_lags": weekly_lags,
         "monthly": monthly,
         "rolling_monthly": rolling_monthly,
+        "rolling_weekly": rolling_weekly,
         "coverage": coverage,
         "regional_weights": regional_weights,
     }
@@ -854,6 +912,7 @@ RESULT_FILENAMES = {
     "weekly_lags": "weekly_lag_correlations.csv",
     "monthly": "monthly_correlations.csv",
     "rolling_monthly": "rolling_monthly_correlations.csv",
+    "rolling_weekly": "rolling_weekly_correlations.csv",
     "coverage": "coverage.csv",
     "regional_weights": "regional_weights.csv",
 }
