@@ -343,6 +343,7 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(figure.layout.legend.yanchor, "top")
         self.assertGreaterEqual(figure.layout.legend.y, 1.2)
         self.assertEqual(figure.layout.title.yanchor, "top")
+        self.assertLessEqual(figure.layout.title.y, 0.94)
 
     def test_heatmap_uses_region_order_and_selected_coefficient(self):
         figure = rain.build_correlation_heatmap(

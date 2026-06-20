@@ -1319,7 +1319,7 @@ def build_lag_profile_chart(
     fig = _style_correlation_chart(fig, 480)
     fig.update_layout(
         margin=dict(l=42, r=24, t=160, b=42),
-        title=dict(y=0.98, yanchor="top"),
+        title=dict(y=0.94, yanchor="top"),
         legend=dict(orientation="h", yanchor="top", y=1.27, x=0),
     )
     return fig
