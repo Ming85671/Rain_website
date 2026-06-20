@@ -1435,6 +1435,28 @@ def monthly_metric_summary(
     }
 
 
+def weekly_metric_summary(
+    weekly: pd.DataFrame,
+    scope: str,
+    metric: str,
+) -> Dict[str, Any]:
+    """Summarize the five-year same-week raw correlation."""
+    selected = weekly[
+        weekly["scope"].eq(scope)
+        & weekly["metric"].eq(metric)
+        & weekly["rain_leads_weeks"].eq(0)
+    ]
+    if len(selected) != 1:
+        raise ValueError(f"Expected one same-week {metric} row for {scope}")
+    row = selected.iloc[0]
+    raw = float(row["pearson_raw"])
+    return {
+        "raw": raw,
+        "weeks": int(row["weeks"]),
+        "verdict": describe_correlation(raw),
+    }
+
+
 def build_rolling_monthly_chart(
     rolling_monthly: pd.DataFrame,
     scope: str,
@@ -1590,6 +1612,7 @@ def render_correlation_page() -> None:
     metric = CORRELATION_METRICS[metric_label]["key"]
     metric_noun = CORRELATION_METRICS[metric_label]["noun"]
     metric_summary = monthly_metric_summary(monthly, scope, metric)
+    weekly_summary = weekly_metric_summary(weekly, scope, metric)
     hero.markdown(
         f"""
         <div class="correlation-hero">
@@ -1600,8 +1623,8 @@ def render_correlation_page() -> None:
         unsafe_allow_html=True,
     )
 
-    card_one, card_two = st.columns([1, 1])
-    with card_one:
+    monthly_card, weekly_card = st.columns([1, 1])
+    with monthly_card:
         st.markdown(
             f'''<div class="correlation-card">
                 <div class="correlation-label">Overall monthly correlation</div>
@@ -1611,18 +1634,28 @@ def render_correlation_page() -> None:
             </div>''',
             unsafe_allow_html=True,
         )
-    with card_two:
+    with weekly_card:
         st.markdown(
             f'''<div class="correlation-card">
-                <div class="correlation-label">What is driving it?</div>
-                <div class="correlation-compare">
-                    <div class="correlation-mini"><div class="correlation-note">Raw monthly</div><div class="correlation-mini-value">{metric_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
-                    <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{metric_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual months</div></div>
-                </div>
-                <div class="correlation-note">{metric_summary["explanation"]}</div>
+                <div class="correlation-label">Overall weekly correlation</div>
+                <div class="correlation-value">{weekly_summary["raw"]:+.3f}</div>
+                <div class="correlation-verdict">{weekly_summary["verdict"]}</div>
+                <div class="correlation-note">Wetter weeks are compared with total weekly {metric_noun} across all {weekly_summary["weeks"]} complete weeks. This is the same-week Raw Pearson coefficient.</div>
             </div>''',
             unsafe_allow_html=True,
         )
+
+    st.markdown(
+        f'''<div class="correlation-card">
+            <div class="correlation-label">What is driving the monthly relationship?</div>
+            <div class="correlation-compare">
+                <div class="correlation-mini"><div class="correlation-note">Raw monthly</div><div class="correlation-mini-value">{metric_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
+                <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{metric_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual months</div></div>
+            </div>
+            <div class="correlation-note">{metric_summary["explanation"]}</div>
+        </div>''',
+        unsafe_allow_html=True,
+    )
 
     st.markdown("### Rolling 24-month correlation")
     st.caption(
@@ -1706,7 +1739,7 @@ def render_correlation_page() -> None:
     with st.expander("Method and interpretation"):
         st.markdown(
             f"""
-            - The headline compares monthly rainfall with monthly {metric_noun} using Raw Pearson correlation.
+            - The headline cards compare rainfall with {metric_noun} across all complete months and all complete weeks using Raw Pearson correlation.
             - The seasonally adjusted value compares each month with the normal pattern for the same calendar month.
             - The monthly rolling chart uses the latest 24 complete months at every point.
             - Monthly lag results compare rainfall with shipments in the same month and up to four months later.

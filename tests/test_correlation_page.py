@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from unittest.mock import Mock, patch
 
@@ -449,6 +450,34 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertEqual(result["adjusted"], -0.250)
         self.assertEqual(result["verdict"], "Moderate negative relationship")
         self.assertIn("remains after normal seasonality", result["explanation"])
+
+    def test_weekly_metric_summary_uses_all_complete_same_weeks(self):
+        weekly = pd.DataFrame(
+            {
+                "scope": ["Philippines weighted"] * 4,
+                "metric": ["shipments", "shipments", "volume_mt", "volume_mt"],
+                "rain_leads_weeks": [0, 1, 0, 1],
+                "pearson_raw": [-0.320, -0.410, -0.275, -0.360],
+                "weeks": [260, 259, 260, 259],
+            }
+        )
+
+        result = rain.weekly_metric_summary(
+            weekly,
+            "Philippines weighted",
+            "volume_mt",
+        )
+
+        self.assertEqual(result["raw"], -0.275)
+        self.assertEqual(result["weeks"], 260)
+        self.assertEqual(result["verdict"], "Weak negative relationship")
+
+    def test_correlation_page_renders_overall_weekly_summary(self):
+        source = inspect.getsource(rain.render_correlation_page)
+
+        self.assertIn("Overall weekly correlation", source)
+        self.assertIn("weekly_metric_summary(weekly, scope, metric)", source)
+        self.assertIn("all {weekly_summary[\"weeks\"]} complete weeks", source)
 
     def test_correlation_page_title_matches_selected_metric(self):
         self.assertEqual(
