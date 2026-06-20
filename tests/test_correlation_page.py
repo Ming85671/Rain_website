@@ -332,7 +332,14 @@ class CorrelationPageTests(unittest.TestCase):
             metric="shipments",
         )
 
-        self.assertGreaterEqual(figure.layout.margin.t, 120)
+        title = figure.layout.title.text
+        self.assertIn("Weekly lag profile<br>", title)
+        self.assertIn(
+            "<span style='font-size:14px'>Shipment count · "
+            "Surigao-Dinagat-Caraga</span>",
+            title,
+        )
+        self.assertGreaterEqual(figure.layout.margin.t, 150)
         self.assertEqual(figure.layout.legend.yanchor, "top")
         self.assertGreaterEqual(figure.layout.legend.y, 1.2)
         self.assertEqual(figure.layout.title.yanchor, "top")
@@ -370,7 +377,13 @@ class CorrelationPageTests(unittest.TestCase):
             "Rain leads shipments (months)",
         )
         self.assertIn("Rain leads %{x}m", figure.data[0].hovertemplate)
-        self.assertIn("Monthly lag profile", figure.layout.title.text)
+        self.assertIn("Monthly lag profile<br>", figure.layout.title.text)
+        self.assertIn(
+            "<span style='font-size:14px'>Shipment count · "
+            "Philippines weighted</span>",
+            figure.layout.title.text,
+        )
+        self.assertGreaterEqual(figure.layout.margin.t, 150)
 
     def test_monthly_heatmap_uses_month_labels_and_title(self):
         monthly_lags = pd.DataFrame(
