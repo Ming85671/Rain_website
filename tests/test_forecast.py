@@ -82,21 +82,23 @@ class ForecastRegionAverageTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "forecast_days"], 2)
         self.assertEqual(result.loc[0, "average_7d_precipitation_mm"], 25.0)
 
-    def test_forecast_axis_adds_one_full_hundred_above_highest_bar(self):
-        self.assertEqual(rain.forecast_rainfall_axis_max([692.9]), 800)
-        self.assertEqual(rain.forecast_rainfall_axis_max([700.0]), 800)
-        self.assertEqual(rain.forecast_rainfall_axis_max([]), 100)
+    def test_forecast_axis_scales_with_small_and_large_values(self):
+        self.assertEqual(rain.forecast_rainfall_axis([22.4]), (30, 5))
+        self.assertEqual(rain.forecast_rainfall_axis([48.0]), (60, 10))
+        self.assertEqual(rain.forecast_rainfall_axis([92.0]), (120, 20))
+        self.assertEqual(rain.forecast_rainfall_axis([692.9]), (800, 100))
+        self.assertEqual(rain.forecast_rainfall_axis([]), (5, 5))
 
-    def test_forecast_summary_axes_show_hundred_interval_horizontal_grid(self):
+    def test_forecast_summary_axes_use_dynamic_horizontal_grid_interval(self):
         fig = go.Figure()
 
-        rain.apply_forecast_summary_axes(fig, 800)
+        rain.apply_forecast_summary_axes(fig, 30, 5)
 
-        self.assertEqual(tuple(fig.layout.yaxis.range), (0, 800))
-        self.assertEqual(fig.layout.yaxis.dtick, 100)
+        self.assertEqual(tuple(fig.layout.yaxis.range), (0, 30))
+        self.assertEqual(fig.layout.yaxis.dtick, 5)
         self.assertTrue(fig.layout.yaxis.showgrid)
         self.assertEqual(fig.layout.yaxis.gridcolor, "#E5E7EB")
-        self.assertEqual({shape.y0 for shape in fig.layout.shapes}, {0, 800})
+        self.assertEqual({shape.y0 for shape in fig.layout.shapes}, {0, 30})
 
 
 class HistoricalSevenDayAverageTests(unittest.TestCase):

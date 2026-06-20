@@ -797,13 +797,25 @@ def rainfall_axis_max(values: Any, step: int = 5) -> int:
     return max(step, int(axis_max))
 
 
-def forecast_rainfall_axis_max(values: Any, step: int = 100) -> int:
+def forecast_rainfall_axis(values: Any) -> tuple[int, int]:
     numeric_values = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
     if numeric_values.empty:
-        return step
+        return 5, 5
 
     highest_value = max(0.0, float(numeric_values.max()))
-    return max(step, int(math.ceil(highest_value / step) * step + step))
+    if highest_value <= 25:
+        step = 5
+    elif highest_value <= 50:
+        step = 10
+    elif highest_value <= 100:
+        step = 20
+    elif highest_value <= 250:
+        step = 50
+    else:
+        step = 100
+
+    axis_max = math.ceil(highest_value / step) * step + step
+    return max(step, int(axis_max)), step
 
 
 def year_color_map(years: List[int]) -> Dict[str, str]:
@@ -875,7 +887,7 @@ def apply_historical_rainfall_axes(fig: Any, y_axis_max: int) -> None:
     )
 
 
-def apply_forecast_summary_axes(fig: Any, y_axis_max: int) -> None:
+def apply_forecast_summary_axes(fig: Any, y_axis_max: int, y_axis_step: int) -> None:
     grid_color = "#E5E7EB"
     fig.update_layout(
         width=430,
@@ -886,7 +898,7 @@ def apply_forecast_summary_axes(fig: Any, y_axis_max: int) -> None:
         yaxis=dict(
             range=[0, y_axis_max],
             tick0=0,
-            dtick=100,
+            dtick=y_axis_step,
             showgrid=True,
             gridcolor=grid_color,
             zeroline=False,
@@ -1044,10 +1056,10 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
             "average_7d_precipitation_mm": "7-day average rainfall (mm/day)",
         },
     )
-    y_axis_max = forecast_rainfall_axis_max(
+    y_axis_max, y_axis_step = forecast_rainfall_axis(
         summary_df["average_7d_precipitation_mm"]
     )
-    apply_forecast_summary_axes(fig_average, y_axis_max)
+    apply_forecast_summary_axes(fig_average, y_axis_max, y_axis_step)
     st.markdown("**Future 7 days average rainfall by region**")
     st.plotly_chart(fig_average, use_container_width=False)
 
