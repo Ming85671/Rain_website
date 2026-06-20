@@ -1440,7 +1440,7 @@ def weekly_metric_summary(
     scope: str,
     metric: str,
 ) -> Dict[str, Any]:
-    """Summarize the five-year same-week raw correlation."""
+    """Summarize raw and seasonally adjusted same-week correlations."""
     selected = weekly[
         weekly["scope"].eq(scope)
         & weekly["metric"].eq(metric)
@@ -1450,10 +1450,29 @@ def weekly_metric_summary(
         raise ValueError(f"Expected one same-week {metric} row for {scope}")
     row = selected.iloc[0]
     raw = float(row["pearson_raw"])
+    adjusted = float(row["pearson_anomaly"])
+    noun = "shipment count" if metric == "shipments" else "shipment volume"
+    if raw <= -0.20 and abs(adjusted) < 0.20:
+        explanation = (
+            "The overall negative relationship mainly reflects the normal wet season. "
+            f"Unusually wet weeks do not show a clear additional relationship with {noun}."
+        )
+    elif raw <= -0.20 and adjusted <= -0.20:
+        explanation = (
+            "The negative relationship remains after normal seasonality is removed, "
+            f"so unusually wet weeks are also associated with lower {noun}."
+        )
+    else:
+        explanation = (
+            "The weekly data does not show a clear overall negative relationship "
+            f"between rainfall and {noun}."
+        )
     return {
         "raw": raw,
+        "adjusted": adjusted,
         "weeks": int(row["weeks"]),
         "verdict": describe_correlation(raw),
+        "explanation": explanation,
     }
 
 
@@ -1645,17 +1664,31 @@ def render_correlation_page() -> None:
             unsafe_allow_html=True,
         )
 
-    st.markdown(
-        f'''<div class="correlation-card">
-            <div class="correlation-label">What is driving the monthly relationship?</div>
-            <div class="correlation-compare">
-                <div class="correlation-mini"><div class="correlation-note">Raw monthly</div><div class="correlation-mini-value">{metric_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
-                <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{metric_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual months</div></div>
-            </div>
-            <div class="correlation-note">{metric_summary["explanation"]}</div>
-        </div>''',
-        unsafe_allow_html=True,
-    )
+    monthly_driver, weekly_driver = st.columns([1, 1])
+    with monthly_driver:
+        st.markdown(
+            f'''<div class="correlation-card">
+                <div class="correlation-label">What is driving the monthly relationship?</div>
+                <div class="correlation-compare">
+                    <div class="correlation-mini"><div class="correlation-note">Raw monthly</div><div class="correlation-mini-value">{metric_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
+                    <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{metric_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual months</div></div>
+                </div>
+                <div class="correlation-note">{metric_summary["explanation"]}</div>
+            </div>''',
+            unsafe_allow_html=True,
+        )
+    with weekly_driver:
+        st.markdown(
+            f'''<div class="correlation-card">
+                <div class="correlation-label">What is driving the weekly relationship?</div>
+                <div class="correlation-compare">
+                    <div class="correlation-mini"><div class="correlation-note">Raw weekly</div><div class="correlation-mini-value">{weekly_summary["raw"]:+.3f}</div><div class="correlation-note">Includes the normal wet season</div></div>
+                    <div class="correlation-mini"><div class="correlation-note">After seasonality</div><div class="correlation-mini-value">{weekly_summary["adjusted"]:+.3f}</div><div class="correlation-note">Compares unusual weeks</div></div>
+                </div>
+                <div class="correlation-note">{weekly_summary["explanation"]}</div>
+            </div>''',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("### Rolling 24-month correlation")
     st.caption(
@@ -1740,7 +1773,7 @@ def render_correlation_page() -> None:
         st.markdown(
             f"""
             - The headline cards compare rainfall with {metric_noun} across all complete months and all complete weeks using Raw Pearson correlation.
-            - The seasonally adjusted value compares each month with the normal pattern for the same calendar month.
+            - The seasonally adjusted values compare each month or week with the normal pattern for the same calendar period.
             - The monthly rolling chart uses the latest 24 complete months at every point.
             - Monthly lag results compare rainfall with shipments in the same month and up to four months later.
             - The weekly rolling chart uses same-week rainfall and shipments over the latest 52 complete weeks. The first 51 weeks do not have enough history for a correlation value.

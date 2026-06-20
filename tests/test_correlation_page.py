@@ -458,6 +458,7 @@ class CorrelationPageTests(unittest.TestCase):
                 "metric": ["shipments", "shipments", "volume_mt", "volume_mt"],
                 "rain_leads_weeks": [0, 1, 0, 1],
                 "pearson_raw": [-0.320, -0.410, -0.275, -0.360],
+                "pearson_anomaly": [-0.080, -0.190, -0.030, -0.120],
                 "weeks": [260, 259, 260, 259],
             }
         )
@@ -469,8 +470,11 @@ class CorrelationPageTests(unittest.TestCase):
         )
 
         self.assertEqual(result["raw"], -0.275)
+        self.assertEqual(result["adjusted"], -0.030)
         self.assertEqual(result["weeks"], 260)
         self.assertEqual(result["verdict"], "Weak negative relationship")
+        self.assertIn("normal wet season", result["explanation"])
+        self.assertIn("Unusually wet weeks", result["explanation"])
 
     def test_correlation_page_renders_overall_weekly_summary(self):
         source = inspect.getsource(rain.render_correlation_page)
@@ -478,6 +482,9 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertIn("Overall weekly correlation", source)
         self.assertIn("weekly_metric_summary(weekly, scope, metric)", source)
         self.assertIn("all {weekly_summary[\"weeks\"]} complete weeks", source)
+        self.assertIn("What is driving the weekly relationship?", source)
+        self.assertIn("Raw weekly", source)
+        self.assertIn("Compares unusual weeks", source)
 
     def test_correlation_page_title_matches_selected_metric(self):
         self.assertEqual(
