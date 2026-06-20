@@ -58,6 +58,47 @@ class ForecastBatchTests(unittest.TestCase):
         self.assertEqual(requests_get.call_args.kwargs["headers"]["Host"], "api.open-meteo.com")
 
 
+class ForecastRegionAverageTests(unittest.TestCase):
+    def test_forecast_average_by_region_averages_across_ports_and_days(self):
+        region_daily = pd.DataFrame(
+            [
+                {
+                    "region_group": "Palawan",
+                    "date": pd.Timestamp("2026-06-20"),
+                    "port_count": 4,
+                    "regional_total_precipitation_mm": 120.0,
+                },
+                {
+                    "region_group": "Palawan",
+                    "date": pd.Timestamp("2026-06-21"),
+                    "port_count": 4,
+                    "regional_total_precipitation_mm": 80.0,
+                },
+            ]
+        )
+
+        result = rain.forecast_average_by_region(region_daily)
+
+        self.assertEqual(result.loc[0, "forecast_days"], 2)
+        self.assertEqual(result.loc[0, "average_7d_precipitation_mm"], 25.0)
+
+    def test_forecast_axis_adds_one_full_hundred_above_highest_bar(self):
+        self.assertEqual(rain.forecast_rainfall_axis_max([692.9]), 800)
+        self.assertEqual(rain.forecast_rainfall_axis_max([700.0]), 800)
+        self.assertEqual(rain.forecast_rainfall_axis_max([]), 100)
+
+    def test_forecast_summary_axes_show_hundred_interval_horizontal_grid(self):
+        fig = go.Figure()
+
+        rain.apply_forecast_summary_axes(fig, 800)
+
+        self.assertEqual(tuple(fig.layout.yaxis.range), (0, 800))
+        self.assertEqual(fig.layout.yaxis.dtick, 100)
+        self.assertTrue(fig.layout.yaxis.showgrid)
+        self.assertEqual(fig.layout.yaxis.gridcolor, "#E5E7EB")
+        self.assertEqual({shape.y0 for shape in fig.layout.shapes}, {0, 800})
+
+
 class HistoricalSevenDayAverageTests(unittest.TestCase):
     def test_historical_seven_day_region_average_uses_non_overlapping_windows(self):
         rows = []

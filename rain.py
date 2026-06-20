@@ -701,20 +701,26 @@ def forecast_daily_region_total(df_daily: pd.DataFrame) -> pd.DataFrame:
     return region_daily
 
 
-def forecast_total_by_region(df_forecast_region_daily: pd.DataFrame) -> pd.DataFrame:
+def forecast_average_by_region(df_forecast_region_daily: pd.DataFrame) -> pd.DataFrame:
     if df_forecast_region_daily.empty:
         return pd.DataFrame()
 
+    region_daily = df_forecast_region_daily.copy()
+    region_daily["daily_region_average_precipitation_mm"] = (
+        region_daily["regional_total_precipitation_mm"]
+        / region_daily["port_count"].replace(0, pd.NA)
+    )
+
     summary = (
-        df_forecast_region_daily.groupby("region_group", as_index=False)
+        region_daily.groupby("region_group", as_index=False)
         .agg(
             forecast_days=("date", "nunique"),
             port_count=("port_count", "max"),
-            total_7d_precipitation_mm=("regional_total_precipitation_mm", "sum"),
+            average_7d_precipitation_mm=("daily_region_average_precipitation_mm", "mean"),
         )
     )
 
-    summary["total_7d_precipitation_mm"] = summary["total_7d_precipitation_mm"].round(2)
+    summary["average_7d_precipitation_mm"] = summary["average_7d_precipitation_mm"].round(2)
     summary["region_group"] = pd.Categorical(
         summary["region_group"],
         categories=REGION_ORDER,
@@ -791,6 +797,15 @@ def rainfall_axis_max(values: Any, step: int = 5) -> int:
     return max(step, int(axis_max))
 
 
+def forecast_rainfall_axis_max(values: Any, step: int = 100) -> int:
+    numeric_values = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if numeric_values.empty:
+        return step
+
+    highest_value = max(0.0, float(numeric_values.max()))
+    return max(step, int(math.ceil(highest_value / step) * step + step))
+
+
 def year_color_map(years: List[int]) -> Dict[str, str]:
     color_map: Dict[str, str] = {}
     reserved_colors = set(YEAR_COLOR_OVERRIDES.values())
@@ -856,6 +871,39 @@ def apply_historical_rainfall_axes(fig: Any, y_axis_max: int) -> None:
                 line=dict(color=grid_color, width=1),
                 layer="below",
             )
+        ],
+    )
+
+
+def apply_forecast_summary_axes(fig: Any, y_axis_max: int) -> None:
+    grid_color = "#E5E7EB"
+    fig.update_layout(
+        width=430,
+        height=390,
+        margin=dict(l=20, r=20, t=20, b=20),
+        plot_bgcolor="white",
+        xaxis=dict(type="category", showgrid=False),
+        yaxis=dict(
+            range=[0, y_axis_max],
+            tick0=0,
+            dtick=100,
+            showgrid=True,
+            gridcolor=grid_color,
+            zeroline=False,
+        ),
+        shapes=[
+            dict(
+                type="line",
+                xref="paper",
+                yref="y",
+                x0=0,
+                x1=1,
+                y0=y_value,
+                y1=y_value,
+                line=dict(color=grid_color, width=1),
+                layer="below",
+            )
+            for y_value in [0, y_axis_max]
         ],
     )
 
@@ -983,29 +1031,25 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Future 7 days total rainfall summary")
-    summary_df = forecast_total_by_region(chart_df)
+    st.subheader("Future 7 days average rainfall summary")
+    summary_df = forecast_average_by_region(chart_df)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-    fig_total = px.bar(
+    fig_average = px.bar(
         summary_df,
         x="region_group",
-        y="total_7d_precipitation_mm",
+        y="average_7d_precipitation_mm",
         labels={
             "region_group": "Region",
-            "total_7d_precipitation_mm": "Rainfall (mm)",
+            "average_7d_precipitation_mm": "7-day average rainfall (mm/day)",
         },
     )
-    fig_total.update_layout(
-        width=430,
-        height=390,
-        margin=dict(l=20, r=20, t=20, b=20),
-        xaxis_type="category",
+    y_axis_max = forecast_rainfall_axis_max(
+        summary_df["average_7d_precipitation_mm"]
     )
-    st.markdown("**Future 7 days total rainfall by region**")
-    _, chart_column, _ = st.columns([2, 2, 2])
-    with chart_column:
-        st.plotly_chart(fig_total, use_container_width=False)
+    apply_forecast_summary_axes(fig_average, y_axis_max)
+    st.markdown("**Future 7 days average rainfall by region**")
+    st.plotly_chart(fig_average, use_container_width=False)
 
 
 # ============================================================
