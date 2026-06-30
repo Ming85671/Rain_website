@@ -87,6 +87,8 @@ REGION_ORDER = [
     "Eastern Samar",
     "Other-Check",
 ]
+PHILIPPINES_OVERALL_REGION = "Philippines overall"
+HISTORICAL_REGION_ORDER = [PHILIPPINES_OVERALL_REGION, *REGION_ORDER]
 
 MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 MONTH_LABEL_MAP = {index: month for index, month in enumerate(MONTH_ORDER, start=1)}
@@ -625,8 +627,12 @@ def historical_seven_day_region_average(
     df["month"] = df["window_start"].dt.strftime("%b")
     df["month_number"] = df["window_start"].dt.month
 
+    overall_df = df.copy()
+    overall_df["region_group"] = PHILIPPINES_OVERALL_REGION
+    chart_df = pd.concat([overall_df, df], ignore_index=True)
+
     region_window = (
-        df.groupby(
+        chart_df.groupby(
             [
                 "region_group",
                 "year",
@@ -661,7 +667,7 @@ def historical_seven_day_region_average(
 
     region_window["region_group"] = pd.Categorical(
         region_window["region_group"],
-        categories=REGION_ORDER,
+        categories=HISTORICAL_REGION_ORDER,
         ordered=True,
     )
     region_window = region_window.sort_values(["region_group", "year", "window_sort"])
@@ -1872,9 +1878,12 @@ def main() -> None:
 
     selected_regions = st.sidebar.multiselect(
         "Regions",
-        options=REGION_ORDER,
-        default=REGION_ORDER,
+        options=HISTORICAL_REGION_ORDER,
+        default=HISTORICAL_REGION_ORDER,
     )
+    selected_forecast_regions = [
+        region for region in selected_regions if region in REGION_ORDER
+    ]
 
     st.sidebar.caption("Historical charts show one average rainfall point every 7 days.")
     st.sidebar.caption("Historical year options are capped at the current year.")
@@ -1900,7 +1909,8 @@ def main() -> None:
         # Historical section
         st.header("1. Historical 7-day average rainfall by region")
         st.caption(
-            "Each historical bar or line point is the average rainfall inside one non-overlapping 7-day window."
+            "Each historical bar or line point is the average rainfall inside one non-overlapping "
+            "7-day window. Philippines overall uses all tracked loading ports."
         )
 
         with st.spinner("Loading historical Open-Meteo rainfall data..."):
@@ -1951,7 +1961,7 @@ def main() -> None:
             st.dataframe(coverage_df, use_container_width=True, hide_index=True)
 
         df_forecast_region_daily = forecast_daily_region_total(df_forecast_daily)
-        show_forecast_section(df_forecast_region_daily, selected_regions)
+        show_forecast_section(df_forecast_region_daily, selected_forecast_regions)
 
 
 if __name__ == "__main__":

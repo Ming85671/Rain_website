@@ -102,6 +102,9 @@ class ForecastRegionAverageTests(unittest.TestCase):
 
 
 class HistoricalSevenDayAverageTests(unittest.TestCase):
+    def _regional_rows(self, result):
+        return result[result["region_group"] != "Philippines overall"].reset_index(drop=True)
+
     def test_historical_seven_day_region_average_uses_non_overlapping_windows(self):
         rows = []
         for day, precipitation in enumerate(range(1, 16), start=1):
@@ -119,12 +122,13 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
             )
 
         result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
+        regional_result = self._regional_rows(result)
 
-        self.assertEqual(len(result), 3)
-        self.assertEqual(result["year"].tolist(), [2026, 2026, 2026])
-        self.assertEqual(result["window_label"].tolist(), ["Jan 1-7", "Jan 8-14", "Jan 15-15"])
-        self.assertEqual(result["window_sort"].tolist(), [1, 8, 15])
-        self.assertEqual(result["average_precipitation_mm"].tolist(), [4.0, 11.0, 15.0])
+        self.assertEqual(len(regional_result), 3)
+        self.assertEqual(regional_result["year"].tolist(), [2026, 2026, 2026])
+        self.assertEqual(regional_result["window_label"].tolist(), ["Jan 1-7", "Jan 8-14", "Jan 15-15"])
+        self.assertEqual(regional_result["window_sort"].tolist(), [1, 8, 15])
+        self.assertEqual(regional_result["average_precipitation_mm"].tolist(), [4.0, 11.0, 15.0])
 
     def test_historical_seven_day_region_average_averages_ports_inside_window(self):
         rows = [
@@ -142,10 +146,39 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
         ]
 
         result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
+        regional_result = self._regional_rows(result)
 
-        self.assertEqual(result.loc[0, "port_count"], 2)
-        self.assertEqual(result.loc[0, "observation_days"], 1)
-        self.assertEqual(result.loc[0, "average_precipitation_mm"], 4.0)
+        self.assertEqual(regional_result.loc[0, "port_count"], 2)
+        self.assertEqual(regional_result.loc[0, "observation_days"], 1)
+        self.assertEqual(regional_result.loc[0, "average_precipitation_mm"], 4.0)
+
+    def test_historical_seven_day_region_average_adds_philippines_overall(self):
+        rows = [
+            {
+                "source": "OpenMeteo",
+                "data_type": "historical",
+                "region_group": region,
+                "port_name": port_name,
+                "latitude": 1.0,
+                "longitude": 101.0,
+                "date": "2026-01-01",
+                "precipitation_mm": precipitation,
+            }
+            for region, port_name, precipitation in [
+                ("Surigao-Dinagat-Caraga", "Port A", 2.0),
+                ("Palawan", "Port B", 6.0),
+                ("Palawan", "Port C", 10.0),
+            ]
+        ]
+
+        result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
+        overall = result[result["region_group"] == "Philippines overall"].reset_index(drop=True)
+
+        self.assertEqual(len(overall), 1)
+        self.assertEqual(overall.loc[0, "window_label"], "Jan 1-1")
+        self.assertEqual(overall.loc[0, "port_count"], 3)
+        self.assertEqual(overall.loc[0, "observation_days"], 1)
+        self.assertEqual(overall.loc[0, "average_precipitation_mm"], 6.0)
 
     def test_historical_seven_day_region_average_groups_december_31_with_prior_week(self):
         rows = []
@@ -164,11 +197,12 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
             )
 
         result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
+        regional_result = self._regional_rows(result)
 
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result.loc[0, "window_label"], "Dec 24-31")
-        self.assertEqual(result.loc[0, "observation_days"], 8)
-        self.assertEqual(result.loc[0, "average_precipitation_mm"], 27.5)
+        self.assertEqual(len(regional_result), 1)
+        self.assertEqual(regional_result.loc[0, "window_label"], "Dec 24-31")
+        self.assertEqual(regional_result.loc[0, "observation_days"], 8)
+        self.assertEqual(regional_result.loc[0, "average_precipitation_mm"], 27.5)
 
 
 class HistoricalChartStyleTests(unittest.TestCase):
