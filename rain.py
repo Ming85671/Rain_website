@@ -1119,7 +1119,17 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         frame["analysis_start"] = frame["analysis_start"].astype(str)
         frame["analysis_end"] = frame["analysis_end"].astype(str)
     rolling_monthly["month"] = rolling_monthly["month"].astype(str)
-    rolling_weekly["week_start"] = rolling_weekly["week_start"].astype(str)
+
+    # Ensure weekly charts always use Monday as the start of the week.
+    rolling_weekly["week_start"] = pd.to_datetime(
+        rolling_weekly["week_start"], errors="coerce"
+    )
+    rolling_weekly["week_start"] = (
+        rolling_weekly["week_start"]
+        - pd.to_timedelta(rolling_weekly["week_start"].dt.weekday, unit="D")
+    )
+    rolling_weekly["week_start"] = rolling_weekly["week_start"].dt.strftime("%Y-%m-%d")
+
     return (
         weekly,
         monthly,
