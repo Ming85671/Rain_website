@@ -612,16 +612,16 @@ def historical_seven_day_region_average(
     if df.empty:
         return pd.DataFrame()
 
-    year_start = pd.to_datetime(df["year"].astype(str) + "-01-01")
-    df["window_sort"] = (((df["date"] - year_start).dt.days // 7) * 7) + 1
-    df["window_start"] = year_start + pd.to_timedelta(df["window_sort"] - 1, unit="D")
-
-    december_tail = (df["date"].dt.month == 12) & (df["date"].dt.day >= 24)
-    df.loc[december_tail, "window_start"] = pd.to_datetime(
-        df.loc[december_tail, "year"].astype(str) + "-12-24"
-    )
-    df.loc[december_tail, "window_sort"] = (
-        (df.loc[december_tail, "window_start"] - year_start.loc[december_tail]).dt.days + 1
+    # Use calendar weeks starting Monday and ending Sunday.
+    # The previous logic counted 7-day blocks from Jan 1, which could create
+    # shifted weeks such as Thursday-Wednesday depending on the year.
+    df["window_start"] = (
+        df["date"] - pd.to_timedelta(df["date"].dt.weekday, unit="D")
+    ).dt.normalize()
+    df["window_sort"] = (
+        (df["window_start"] - pd.to_datetime(df["year"].astype(str) + "-01-01"))
+        .dt.days
+        + 1
     )
 
     df["month"] = df["window_start"].dt.strftime("%b")
@@ -1119,17 +1119,7 @@ def load_correlation_outputs(data_dir: Path = CORRELATION_DATA_DIR):
         frame["analysis_start"] = frame["analysis_start"].astype(str)
         frame["analysis_end"] = frame["analysis_end"].astype(str)
     rolling_monthly["month"] = rolling_monthly["month"].astype(str)
-
-    # Ensure weekly charts always use Monday as the start of the week.
-    rolling_weekly["week_start"] = pd.to_datetime(
-        rolling_weekly["week_start"], errors="coerce"
-    )
-    rolling_weekly["week_start"] = (
-        rolling_weekly["week_start"]
-        - pd.to_timedelta(rolling_weekly["week_start"].dt.weekday, unit="D")
-    )
-    rolling_weekly["week_start"] = rolling_weekly["week_start"].dt.strftime("%Y-%m-%d")
-
+    rolling_weekly["week_start"] = rolling_weekly["week_start"].astype(str)
     return (
         weekly,
         monthly,
