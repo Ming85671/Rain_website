@@ -87,6 +87,14 @@ REGION_ORDER = [
     "Eastern Samar",
     "Other-Check",
 ]
+REGION_COLOR_MAP = {
+    "Surigao-Dinagat-Caraga": "#0B5FFF",
+    "Palawan": "#38A3EB",
+    "Zambales-Luzon": "#E05252",
+    "Tawi-Tawi": "#F5A3A3",
+    "Eastern Samar": "#0F9B8E",
+    "Other-Check": "#55C97A",
+}
 PHILIPPINES_OVERALL_REGION = "Philippines overall"
 HISTORICAL_REGION_ORDER = [PHILIPPINES_OVERALL_REGION, *REGION_ORDER]
 
@@ -694,6 +702,10 @@ def forecast_daily_region_total(df_daily: pd.DataFrame) -> pd.DataFrame:
     region_daily["regional_total_precipitation_mm"] = region_daily[
         "regional_total_precipitation_mm"
     ].round(2)
+    region_daily["daily_region_average_precipitation_mm"] = (
+        region_daily["regional_total_precipitation_mm"]
+        / region_daily["port_count"].replace(0, pd.NA)
+    ).round(2)
 
     region_daily["date_label"] = region_daily["date"].dt.strftime("%Y-%m-%d")
     region_daily["region_group"] = pd.Categorical(
@@ -712,10 +724,11 @@ def forecast_average_by_region(df_forecast_region_daily: pd.DataFrame) -> pd.Dat
         return pd.DataFrame()
 
     region_daily = df_forecast_region_daily.copy()
-    region_daily["daily_region_average_precipitation_mm"] = (
-        region_daily["regional_total_precipitation_mm"]
-        / region_daily["port_count"].replace(0, pd.NA)
-    )
+    if "daily_region_average_precipitation_mm" not in region_daily:
+        region_daily["daily_region_average_precipitation_mm"] = (
+            region_daily["regional_total_precipitation_mm"]
+            / region_daily["port_count"].replace(0, pd.NA)
+        )
 
     summary = (
         region_daily.groupby("region_group", as_index=False)
@@ -893,11 +906,17 @@ def apply_historical_rainfall_axes(fig: Any, y_axis_max: int) -> None:
     )
 
 
-def apply_forecast_summary_axes(fig: Any, y_axis_max: int, y_axis_step: int) -> None:
+def apply_forecast_rainfall_axes(
+    fig: Any,
+    y_axis_max: int,
+    y_axis_step: int,
+    *,
+    height: int = 390,
+    width: int | None = 430,
+) -> None:
     grid_color = "#E5E7EB"
-    fig.update_layout(
-        width=430,
-        height=390,
+    layout = dict(
+        height=height,
         margin=dict(l=20, r=20, t=20, b=20),
         plot_bgcolor="white",
         xaxis=dict(type="category", showgrid=False),
@@ -924,6 +943,13 @@ def apply_forecast_summary_axes(fig: Any, y_axis_max: int, y_axis_step: int) -> 
             for y_value in [0, y_axis_max]
         ],
     )
+    if width is not None:
+        layout["width"] = width
+    fig.update_layout(**layout)
+
+
+def apply_forecast_summary_axes(fig: Any, y_axis_max: int, y_axis_step: int) -> None:
+    apply_forecast_rainfall_axes(fig, y_axis_max, y_axis_step)
 
 
 def apply_year_trace_styles(fig: Any) -> None:
@@ -1027,36 +1053,67 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
         df_forecast_region_daily["region_group"].isin(selected_regions)
     ].copy()
 
-    st.subheader("Future 7 days daily rainfall by region")
+    st.subheader("Future 7 days daily average rainfall by region")
+    st.caption(
+        "Rainfall intensity comparison: each daily regional total divided by the "
+        "number of reporting ports (mm per port per day)."
+    )
 
-    fig = px.bar(
+    fig_daily_average = px.bar(
         chart_df,
         x="date_label",
-        y="regional_total_precipitation_mm",
+        y="daily_region_average_precipitation_mm",
         color="region_group",
         barmode="group",
-        title="Future 7 days daily rainfall by region",
+        color_discrete_map=REGION_COLOR_MAP,
+        title="Future 7 days daily average rainfall by region",
+        hover_data={
+            "daily_region_average_precipitation_mm": ":.2f",
+            "regional_total_precipitation_mm": ":.2f",
+            "port_count": True,
+        },
         labels={
             "date_label": "Date",
-            "regional_total_precipitation_mm": "Rainfall (mm)",
+            "daily_region_average_precipitation_mm": "Daily average rainfall (mm/port/day)",
+            "regional_total_precipitation_mm": "Regional total (mm across ports)",
+            "port_count": "Reporting ports",
             "region_group": "Region",
         },
     )
-    fig.update_layout(
-        height=430,
-        margin=dict(l=20, r=20, t=60, b=20),
-        xaxis_type="category",
+    average_axis_max, average_axis_step = forecast_rainfall_axis(
+        chart_df["daily_region_average_precipitation_mm"]
     )
-    st.plotly_chart(fig, use_container_width=True)
+    apply_forecast_rainfall_axes(
+        fig_daily_average,
+        average_axis_max,
+        average_axis_step,
+        height=430,
+        width=None,
+    )
+    st.plotly_chart(fig_daily_average, use_container_width=True)
 
     st.subheader("Future 7 days average rainfall summary")
     summary_df = forecast_average_by_region(chart_df)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.caption(
+        "Seven-day mean of the daily per-port rainfall values above. It is suitable "
+        "for comparing typical forecast rainfall intensity across regions."
+    )
+    summary_display_df = summary_df.rename(
+        columns={
+            "region_group": "Region",
+            "forecast_days": "Forecast days",
+            "port_count": "Reporting ports (max/day)",
+            "average_7d_precipitation_mm": "7-day average daily rainfall (mm/port/day)",
+        }
+    )
+    st.dataframe(summary_display_df, use_container_width=True, hide_index=True)
 
     fig_average = px.bar(
         summary_df,
         x="region_group",
         y="average_7d_precipitation_mm",
+        color="region_group",
+        color_discrete_map=REGION_COLOR_MAP,
         labels={
             "region_group": "Region",
             "average_7d_precipitation_mm": "7-day average rainfall (mm/day)",
@@ -1068,6 +1125,45 @@ def show_forecast_section(df_forecast_region_daily: pd.DataFrame, selected_regio
     apply_forecast_summary_axes(fig_average, y_axis_max, y_axis_step)
     st.markdown("**Future 7 days average rainfall by region**")
     st.plotly_chart(fig_average, use_container_width=False)
+
+    st.subheader("Future 7 days daily regional rainfall total")
+    st.caption(
+        "Operational coverage view: precipitation summed across all reporting ports "
+        "in each region (mm across ports). Regions with more reporting ports will "
+        "normally have larger totals, so do not use this chart to compare rainfall intensity."
+    )
+    fig_regional_total = px.bar(
+        chart_df,
+        x="date_label",
+        y="regional_total_precipitation_mm",
+        color="region_group",
+        barmode="group",
+        color_discrete_map=REGION_COLOR_MAP,
+        title="Future 7 days daily regional rainfall total",
+        hover_data={
+            "regional_total_precipitation_mm": ":.2f",
+            "daily_region_average_precipitation_mm": ":.2f",
+            "port_count": True,
+        },
+        labels={
+            "date_label": "Date",
+            "regional_total_precipitation_mm": "Regional rainfall total (mm across ports)",
+            "daily_region_average_precipitation_mm": "Daily average rainfall (mm/port/day)",
+            "port_count": "Reporting ports",
+            "region_group": "Region",
+        },
+    )
+    total_axis_max, total_axis_step = forecast_rainfall_axis(
+        chart_df["regional_total_precipitation_mm"]
+    )
+    apply_forecast_rainfall_axes(
+        fig_regional_total,
+        total_axis_max,
+        total_axis_step,
+        height=430,
+        width=None,
+    )
+    st.plotly_chart(fig_regional_total, use_container_width=True)
 
 
 # ============================================================

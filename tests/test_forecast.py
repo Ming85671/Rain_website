@@ -59,6 +59,30 @@ class ForecastBatchTests(unittest.TestCase):
 
 
 class ForecastRegionAverageTests(unittest.TestCase):
+    def test_forecast_daily_region_total_includes_per_port_daily_average(self):
+        df_daily = pd.DataFrame(
+            [
+                {
+                    "region_group": "Palawan",
+                    "date": pd.Timestamp("2026-06-20"),
+                    "port_name": "Port A",
+                    "precipitation_mm": 20.0,
+                },
+                {
+                    "region_group": "Palawan",
+                    "date": pd.Timestamp("2026-06-20"),
+                    "port_name": "Port B",
+                    "precipitation_mm": 40.0,
+                },
+            ]
+        )
+
+        result = rain.forecast_daily_region_total(df_daily)
+
+        self.assertEqual(result.loc[0, "regional_total_precipitation_mm"], 60.0)
+        self.assertEqual(result.loc[0, "port_count"], 2)
+        self.assertEqual(result.loc[0, "daily_region_average_precipitation_mm"], 30.0)
+
     def test_forecast_average_by_region_averages_across_ports_and_days(self):
         region_daily = pd.DataFrame(
             [
@@ -98,6 +122,15 @@ class ForecastRegionAverageTests(unittest.TestCase):
         self.assertEqual(fig.layout.yaxis.dtick, 5)
         self.assertTrue(fig.layout.yaxis.showgrid)
         self.assertEqual(fig.layout.yaxis.gridcolor, "#E5E7EB")
+        self.assertEqual({shape.y0 for shape in fig.layout.shapes}, {0, 30})
+
+    def test_forecast_chart_axes_can_expand_to_container_width(self):
+        fig = go.Figure()
+
+        rain.apply_forecast_rainfall_axes(fig, 30, 5, height=430, width=None)
+
+        self.assertEqual(fig.layout.height, 430)
+        self.assertIsNone(fig.layout.width)
         self.assertEqual({shape.y0 for shape in fig.layout.shapes}, {0, 30})
 
 
