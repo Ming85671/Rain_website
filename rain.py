@@ -1120,7 +1120,7 @@ def show_historical_region_charts(
             fig_line.add_trace(go.Scatter(
                 x=forecast_x, y=forecast_y, mode="lines",
                 name=f"{primary_year} forecast outlook",
-                line=dict(color=OUTLOOK_COLOR, width=3.5, dash="dash"),
+                line=dict(color=OUTLOOK_COLOR, width=3.5, dash="6px 3px"),
                 text=forecast_hover, hovertemplate="%{text}<extra></extra>",
             ))
         apply_historical_rainfall_axes(fig_line, y_axis_max)

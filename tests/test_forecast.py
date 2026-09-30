@@ -319,7 +319,7 @@ class HistoricalChartStyleTests(unittest.TestCase):
         line, bar = [call.args[0] for call in plotly_chart.call_args_list]
         forecast_line = line.data[-1]
         forecast_bar = bar.data[-1]
-        self.assertEqual(forecast_line.line.dash, "dash")
+        self.assertEqual(forecast_line.line.dash, "6px 3px")
         self.assertEqual(list(forecast_line.x), [264, 271, 278])
         self.assertEqual(forecast_bar.marker.color, rain.OUTLOOK_COLOR)
         self.assertEqual(list(forecast_bar.x), [271, 278])
