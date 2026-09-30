@@ -1114,9 +1114,16 @@ def show_historical_region_charts(
                 for row in region_outlook.itertuples()
             ]
             if not bridge.empty:
-                forecast_x.insert(0, int(bridge.iloc[0]["window_sort"]))
-                forecast_y.insert(0, float(bridge.iloc[0]["average_precipitation_mm"]))
-                forecast_hover.insert(0, "Last completed week (historical)")
+                last_week = bridge.iloc[0]
+                forecast_x.insert(0, int(last_week["window_sort"]))
+                forecast_y.insert(0, float(last_week["average_precipitation_mm"]))
+                forecast_hover.insert(
+                    0,
+                    f"{last_week['hover_label']}"
+                    f"<br>7-day average rainfall: {last_week['average_precipitation_mm']:.2f} mm/day"
+                    f"<br>Ports: {last_week['port_count']}"
+                    f"<br>Days: {last_week['observation_days']}",
+                )
             fig_line.add_trace(go.Scatter(
                 x=forecast_x, y=forecast_y, mode="lines",
                 name=f"{primary_year} forecast outlook",

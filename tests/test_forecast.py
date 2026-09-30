@@ -321,6 +321,9 @@ class HistoricalChartStyleTests(unittest.TestCase):
         forecast_bar = bar.data[-1]
         self.assertEqual(forecast_line.line.dash, "6px 3px")
         self.assertEqual(list(forecast_line.x), [264, 271, 278])
+        self.assertIn("2026-09-21 to 2026-09-27", forecast_line.text[0])
+        self.assertIn("7-day average rainfall: 4.00 mm/day", forecast_line.text[0])
+        self.assertNotIn("Last completed week", forecast_line.text[0])
         self.assertEqual(forecast_bar.marker.color, rain.OUTLOOK_COLOR)
         self.assertEqual(list(forecast_bar.x), [271, 278])
         self.assertTrue(bar.data[0].showlegend)
