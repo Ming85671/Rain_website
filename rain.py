@@ -4,10 +4,11 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta, datetime
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 import certifi
 import correlation_analysis as correlation
@@ -103,6 +104,7 @@ MONTH_LABEL_MAP = {index: month for index, month in enumerate(MONTH_ORDER, start
 MONTH_TICK_VALUES = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
 YEAR_COLOR_OVERRIDES = {"2026": "#0B5FFF"}
 FOCUS_YEAR_LABEL = "2026"
+OUTLOOK_COLOR = "#D97706"
 FOCUS_YEAR_LINE_WIDTH = 3.5
 COMPARISON_YEAR_LINE_WIDTH = 1.8
 COMPARISON_YEAR_OPACITY = 0.6
@@ -299,6 +301,7 @@ def fetch_openmeteo_forecast_daily(
     lat: float,
     lon: float,
     forecast_days: int = 7,
+    past_days: int = 0,
 ) -> Dict[str, Any]:
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -306,6 +309,7 @@ def fetch_openmeteo_forecast_daily(
         "longitude": lon,
         "daily": "precipitation_sum",
         "forecast_days": forecast_days,
+        "past_days": past_days,
         "timezone": TIMEZONE,
     }
     # Forecast should be fast. Use fewer retries than historical data,
@@ -335,6 +339,7 @@ def fetch_openmeteo_historical_daily_batch(
 def fetch_openmeteo_forecast_daily_batch(
     ports: Dict[str, Dict[str, Any]],
     forecast_days: int = 7,
+    past_days: int = 0,
 ) -> List[Dict[str, Any]]:
     """Try to fetch all forecast locations in one Open-Meteo request."""
     url = "https://api.open-meteo.com/v1/forecast"
@@ -343,6 +348,7 @@ def fetch_openmeteo_forecast_daily_batch(
         "longitude": ",".join(str(port_info["lon"]) for port_info in ports.values()),
         "daily": "precipitation_sum",
         "forecast_days": forecast_days,
+        "past_days": past_days,
         "timezone": TIMEZONE,
     }
     data = request_openmeteo_with_dns_fallback(url, params, retries=3, sleep_seconds=0.8)
@@ -419,11 +425,12 @@ def fetch_one_historical_port(port_name: str, port_info: Dict[str, Any], start_d
     return parse_openmeteo_daily(port_name, port_info, data, "historical")
 
 
-def fetch_one_forecast_port(port_name: str, port_info: Dict[str, Any], forecast_days: int) -> List[Dict[str, Any]]:
+def fetch_one_forecast_port(port_name: str, port_info: Dict[str, Any], forecast_days: int, past_days: int = 0) -> List[Dict[str, Any]]:
     data = fetch_openmeteo_forecast_daily(
         lat=port_info["lat"],
         lon=port_info["lon"],
         forecast_days=forecast_days,
+        past_days=past_days,
     )
     return parse_openmeteo_daily(port_name, port_info, data, "forecast")
 
@@ -448,14 +455,14 @@ def fetch_historical_concurrently(start_date: str, end_date: str) -> tuple[List[
     return all_rows, failed_ports
 
 
-def fetch_forecast_concurrently(forecast_days: int) -> tuple[List[Dict[str, Any]], List[str]]:
+def fetch_forecast_concurrently(forecast_days: int, past_days: int = 0) -> tuple[List[Dict[str, Any]], List[str]]:
     all_rows: List[Dict[str, Any]] = []
     failed_ports: List[str] = []
     max_workers = min(8, len(PORTS))
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_port = {
-            executor.submit(fetch_one_forecast_port, port_name, port_info, forecast_days): port_name
+            executor.submit(fetch_one_forecast_port, port_name, port_info, forecast_days, past_days): port_name
             for port_name, port_info in PORTS.items()
         }
         for future in as_completed(future_to_port):
@@ -507,9 +514,10 @@ def load_forecast_data_today_cached(
     today_key: str,
     forecast_days: int = 7,
     cache_version: str = FORECAST_CACHE_VERSION,
+    past_days: int = 0,
 ) -> pd.DataFrame:
     """
-    Forecast is always based on current day + future 7 days.
+    Forecast is based on today, with configurable past and future coverage.
 
     Fast path: one Open-Meteo batch request for all locations.
     Fallback: if batch fails or returns wrong location count, fetch ports concurrently.
@@ -520,7 +528,7 @@ def load_forecast_data_today_cached(
     failed_ports: List[str] = []
 
     try:
-        forecasts = fetch_openmeteo_forecast_daily_batch(PORTS, forecast_days)
+        forecasts = fetch_openmeteo_forecast_daily_batch(PORTS, forecast_days, past_days)
         if len(forecasts) != len(PORTS):
             raise ValueError(f"Expected {len(PORTS)} forecast locations, received {len(forecasts)}.")
 
@@ -528,7 +536,7 @@ def load_forecast_data_today_cached(
             all_rows.extend(parse_openmeteo_daily(port_name, port_info, forecast, "forecast"))
 
     except Exception as batch_exc:
-        all_rows, failed_ports = fetch_forecast_concurrently(forecast_days)
+        all_rows, failed_ports = fetch_forecast_concurrently(forecast_days, past_days)
         if failed_ports:
             failed_ports.insert(0, f"Batch forecast request failed first: {batch_exc}")
 
@@ -612,26 +620,22 @@ def historical_seven_day_region_average(
     if df.empty:
         return pd.DataFrame()
 
-    df["year"] = df["date"].dt.year
-
-    if selected_years is not None:
-        df = df[df["year"].isin(selected_years)]
-
-    if df.empty:
-        return pd.DataFrame()
-
     # Use calendar weeks starting Monday and ending Sunday.
     # The previous logic counted 7-day blocks from Jan 1, which could create
     # shifted weeks such as Thursday-Wednesday depending on the year.
     df["window_start"] = (
         df["date"] - pd.to_timedelta(df["date"].dt.weekday, unit="D")
     ).dt.normalize()
+    df["window_end"] = df["window_start"] + pd.Timedelta(days=6)
+    # Assign a week spanning New Year to the year of its Sunday.
+    df["year"] = df["window_end"].dt.year
+    if selected_years is not None:
+        df = df[df["year"].isin(selected_years)]
+    if df.empty:
+        return pd.DataFrame()
     df["window_sort"] = (
-        (df["window_start"] - pd.to_datetime(df["year"].astype(str) + "-01-01"))
-        .dt.days
-        + 1
-    )
-
+        df["window_start"] - pd.to_datetime(df["year"].astype(str) + "-01-01")
+    ).dt.days + 1
     df["month"] = df["window_start"].dt.strftime("%b")
     df["month_number"] = df["window_start"].dt.month
 
@@ -652,7 +656,7 @@ def historical_seven_day_region_average(
             as_index=False,
         )
         .agg(
-            window_end=("date", "max"),
+            window_end=("window_end", "first"),
             port_count=("port_name", "nunique"),
             observation_days=("date", "nunique"),
             average_precipitation_mm=("precipitation_mm", "mean"),
@@ -662,10 +666,16 @@ def historical_seven_day_region_average(
     region_window["average_precipitation_mm"] = region_window[
         "average_precipitation_mm"
     ].round(2)
+    same_month = (
+        region_window["window_start"].dt.to_period("M")
+        == region_window["window_end"].dt.to_period("M")
+    )
     region_window["window_label"] = (
         region_window["window_start"].dt.strftime("%b %-d")
         + "-"
-        + region_window["window_end"].dt.strftime("%-d")
+        + region_window["window_end"].dt.strftime("%b %-d").where(
+            ~same_month, region_window["window_end"].dt.strftime("%-d")
+        )
     )
     region_window["hover_label"] = (
         region_window["window_start"].dt.strftime("%Y-%m-%d")
@@ -683,6 +693,79 @@ def historical_seven_day_region_average(
     region_window["year_label"] = region_window["year"].astype(str)
 
     return region_window
+
+
+def weekly_rainfall_outlook(
+    df_historical: pd.DataFrame,
+    df_forecast: pd.DataFrame,
+    today: date,
+) -> pd.DataFrame:
+    """Blend historical archive values and forecast into two calendar weeks.
+
+    A port contributes only when all seven daily values are available. Historical
+    archive values before today take precedence; today's value remains a forecast because
+    its daily total is not yet complete.
+    """
+    week_start = today - timedelta(days=today.weekday())
+    last_day = week_start + timedelta(days=13)
+    frames = []
+    for source, frame in (("historical", df_historical), ("forecast", df_forecast)):
+        if frame.empty:
+            continue
+        daily = frame[["region_group", "port_name", "date", "precipitation_mm"]].copy()
+        daily["date"] = pd.to_datetime(daily["date"], errors="coerce").dt.normalize()
+        daily["precipitation_mm"] = pd.to_numeric(daily["precipitation_mm"], errors="coerce")
+        daily = daily.dropna(subset=["date", "precipitation_mm"])
+        daily = daily[daily["date"].between(pd.Timestamp(week_start), pd.Timestamp(last_day))]
+        if source == "historical":
+            daily = daily[daily["date"] < pd.Timestamp(today)]
+        daily["source_type"] = source
+        daily["priority"] = 0 if source == "historical" else 1
+        frames.append(daily)
+
+    if not frames:
+        return pd.DataFrame()
+
+    daily = pd.concat(frames, ignore_index=True)
+    daily = daily.sort_values("priority").drop_duplicates(["port_name", "date"])
+    daily["window_start"] = (
+        daily["date"] - pd.to_timedelta(daily["date"].dt.weekday, unit="D")
+    ).dt.normalize()
+    complete_port_weeks = (
+        daily.groupby(["region_group", "port_name", "window_start"])["date"]
+        .nunique()
+        .eq(7)
+        .rename("complete")
+        .reset_index()
+    )
+    daily = daily.merge(complete_port_weeks, on=["region_group", "port_name", "window_start"])
+    daily = daily[daily["complete"]]
+    if daily.empty:
+        return pd.DataFrame()
+
+    overall = daily.copy()
+    overall["region_group"] = PHILIPPINES_OVERALL_REGION
+    combined = pd.concat([overall, daily], ignore_index=True)
+    combined["historical_port_day"] = combined["source_type"].eq("historical").astype(int)
+    outlook = (
+        combined.groupby(["region_group", "window_start"], as_index=False)
+        .agg(
+            port_count=("port_name", "nunique"),
+            historical_port_days=("historical_port_day", "sum"),
+            average_precipitation_mm=("precipitation_mm", "mean"),
+        )
+    )
+    outlook["forecast_port_days"] = outlook["port_count"] * 7 - outlook["historical_port_days"]
+    outlook["window_end"] = outlook["window_start"] + pd.Timedelta(days=6)
+    outlook["window_sort"] = (
+        outlook["window_start"] - pd.Timestamp(date(today.year, 1, 1))
+    ).dt.days + 1
+    outlook["average_precipitation_mm"] = outlook["average_precipitation_mm"].round(2)
+    outlook["hover_label"] = (
+        outlook["window_start"].dt.strftime("%Y-%m-%d")
+        + " to " + outlook["window_end"].dt.strftime("%Y-%m-%d")
+    )
+    return outlook.sort_values(["region_group", "window_start"])
 
 
 def forecast_daily_region_total(df_daily: pd.DataFrame) -> pd.DataFrame:
@@ -968,6 +1051,7 @@ def show_historical_region_charts(
     df_seven_day: pd.DataFrame,
     selected_regions: List[str],
     selected_years: List[int],
+    df_outlook: pd.DataFrame | None = None,
 ) -> None:
     if df_seven_day.empty:
         st.warning("No historical 7-day average data available.")
@@ -983,7 +1067,13 @@ def show_historical_region_charts(
             continue
 
         primary_year_df = region_df[region_df["year"] == primary_year].copy()
-        y_axis_max = rainfall_axis_max(region_df["average_precipitation_mm"])
+        region_outlook = pd.DataFrame()
+        if df_outlook is not None and not df_outlook.empty:
+            region_outlook = df_outlook[df_outlook["region_group"] == region].copy()
+        axis_values = region_df["average_precipitation_mm"]
+        if not region_outlook.empty:
+            axis_values = pd.concat([axis_values, region_outlook["average_precipitation_mm"]])
+        y_axis_max = rainfall_axis_max(axis_values)
         st.subheader(region)
 
         fig_line = px.line(
@@ -1012,6 +1102,27 @@ def show_historical_region_charts(
             },
         )
         apply_year_trace_styles(fig_line)
+        if not region_outlook.empty:
+            bridge = primary_year_df.sort_values("window_start").tail(1)
+            forecast_x = region_outlook["window_sort"].tolist()
+            forecast_y = region_outlook["average_precipitation_mm"].tolist()
+            forecast_hover = [
+                f"{row.hover_label}<br>Forecast outlook: {row.average_precipitation_mm:.2f} mm/day"
+                f"<br>Historical port-days: {row.historical_port_days}"
+                f"<br>Forecast port-days: {row.forecast_port_days}"
+                f"<br>Complete ports: {row.port_count}"
+                for row in region_outlook.itertuples()
+            ]
+            if not bridge.empty:
+                forecast_x.insert(0, int(bridge.iloc[0]["window_sort"]))
+                forecast_y.insert(0, float(bridge.iloc[0]["average_precipitation_mm"]))
+                forecast_hover.insert(0, "Last completed week (historical)")
+            fig_line.add_trace(go.Scatter(
+                x=forecast_x, y=forecast_y, mode="lines",
+                name=f"{primary_year} forecast outlook",
+                line=dict(color=OUTLOOK_COLOR, width=3.5, dash="dash"),
+                text=forecast_hover, hovertemplate="%{text}<extra></extra>",
+            ))
         apply_historical_rainfall_axes(fig_line, y_axis_max)
         st.plotly_chart(fig_line, use_container_width=True)
 
@@ -1039,7 +1150,25 @@ def show_historical_region_charts(
                 "observation_days": "Days",
             },
         )
-        fig_bar.update_traces(marker_color=color_map.get(str(primary_year), "#0B5FFF"))
+        fig_bar.update_traces(
+            marker_color=color_map.get(str(primary_year), "#0B5FFF"),
+            name=f"{primary_year} historical", showlegend=not region_outlook.empty,
+        )
+        if not region_outlook.empty:
+            fig_bar.add_trace(go.Bar(
+                x=region_outlook["window_sort"],
+                y=region_outlook["average_precipitation_mm"],
+                name=f"{primary_year} forecast outlook",
+                marker_color=OUTLOOK_COLOR,
+                text=[
+                    f"{row.hover_label}<br>Forecast outlook: {row.average_precipitation_mm:.2f} mm/day"
+                    f"<br>Historical port-days: {row.historical_port_days}"
+                    f"<br>Forecast port-days: {row.forecast_port_days}"
+                    f"<br>Complete ports: {row.port_count}"
+                    for row in region_outlook.itertuples()
+                ],
+                hovertemplate="%{text}<extra></extra>",
+            ))
         apply_historical_rainfall_axes(fig_bar, y_axis_max)
         st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -1949,7 +2078,7 @@ def render_correlation_page() -> None:
 # ============================================================
 
 def main() -> None:
-    today = date.today()
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
         "Select page",
@@ -1981,10 +2110,10 @@ def main() -> None:
         region for region in selected_regions if region in REGION_ORDER
     ]
 
-    st.sidebar.caption("Historical charts show one average rainfall point every 7 days.")
+    st.sidebar.caption("Weekly charts show completed weeks plus the current and next forecast weeks.")
     st.sidebar.caption("Historical year options are capped at the current year.")
     st.sidebar.caption("Current-year historical data is capped at today.")
-    st.sidebar.caption("Forecast is always today + future 7 days.")
+    st.sidebar.caption("Daily forecast below shows today and the next 6 days.")
     st.sidebar.caption("Data source: Open-Meteo API. Unit: mm.")
 
     if page == "Philippine rain":
@@ -1999,14 +2128,17 @@ def main() -> None:
             st.warning("Please select at least one historical year in the sidebar.")
             return
 
-        historical_start_date = date(min(selected_years), 1, 1)
+        first_year_day = date(min(selected_years), 1, 1)
+        historical_start_date = first_year_day - timedelta(days=first_year_day.weekday())
         historical_end_date = min(date(max(selected_years), 12, 31), today)
 
         # Historical section
-        st.header("1. Historical 7-day average rainfall by region")
+        st.header("1. Weekly average rainfall by region")
         st.caption(
-            "Each historical bar or line point is the average rainfall inside one non-overlapping "
-            "7-day window. Philippines overall uses all tracked loading ports."
+            "Solid lines and blue bars are completed Monday–Sunday weeks. Dashed lines and orange bars "
+            "show the current and next week. The current week combines available historical archive values "
+            "with forecast values; hover to see the source mix and complete port coverage. "
+            "Philippines overall uses all tracked loading ports."
         )
 
         with st.spinner("Loading historical Open-Meteo rainfall data..."):
@@ -2025,6 +2157,39 @@ def main() -> None:
         df_hist_seven_day_selected = df_hist_seven_day[
             df_hist_seven_day["region_group"].isin(selected_regions)
         ].copy() if not df_hist_seven_day.empty else pd.DataFrame()
+        if not df_hist_seven_day_selected.empty:
+            df_hist_seven_day_selected = df_hist_seven_day_selected[
+                df_hist_seven_day_selected["window_start"] + pd.Timedelta(days=6)
+                < pd.Timestamp(today)
+            ].copy()
+
+        week_start = today - timedelta(days=today.weekday())
+        next_sunday = week_start + timedelta(days=13)
+        forecast_days = (next_sunday - today).days + 1
+        with st.spinner("Loading Open-Meteo forecast through next Sunday..."):
+            df_forecast_daily = load_forecast_data_today_cached(
+                today_key=today.strftime("%Y-%m-%d"),
+                forecast_days=forecast_days,
+                past_days=today.weekday(),
+                cache_version=FORECAST_CACHE_VERSION,
+            )
+
+        df_outlook = weekly_rainfall_outlook(df_hist_daily, df_forecast_daily, today)
+        if today.year not in selected_years:
+            df_outlook = pd.DataFrame()
+        else:
+            expected_weeks = {pd.Timestamp(week_start), pd.Timestamp(week_start + timedelta(days=7))}
+            missing = [
+                region for region in selected_regions
+                if df_outlook.empty or set(
+                    df_outlook.loc[df_outlook["region_group"] == region, "window_start"]
+                ) != expected_weeks
+            ]
+            if missing:
+                st.warning(
+                    "Some weekly outlook points are unavailable because complete seven-day "
+                    "port coverage was not returned for: " + ", ".join(missing)
+                )
 
         if not df_hist_seven_day_selected.empty:
             st.dataframe(
@@ -2033,19 +2198,14 @@ def main() -> None:
                 hide_index=True,
             )
 
-        show_historical_region_charts(df_hist_seven_day_selected, selected_regions, selected_years)
+        show_historical_region_charts(
+            df_hist_seven_day_selected, selected_regions, selected_years, df_outlook
+        )
 
         # Forecast section
         st.header("2. Future 7 days rainfall")
         st.caption(f"Forecast is fixed from today: {today.strftime('%Y-%m-%d')}. It is not affected by historical date selections.")
         st.caption("Forecast uses one batch request first. If batch fails, it automatically falls back to concurrent per-port requests.")
-
-        with st.spinner("Loading today's Open-Meteo 7-day forecast..."):
-            df_forecast_daily = load_forecast_data_today_cached(
-                today_key=today.strftime("%Y-%m-%d"),
-                forecast_days=7,
-                cache_version=FORECAST_CACHE_VERSION,
-            )
 
         failed_forecast_ports = df_forecast_daily.attrs.get("failed_ports", [])
         if failed_forecast_ports:
@@ -2056,7 +2216,11 @@ def main() -> None:
             coverage_df = actual_port_count_by_region(df_forecast_daily)
             st.dataframe(coverage_df, use_container_width=True, hide_index=True)
 
-        df_forecast_region_daily = forecast_daily_region_total(df_forecast_daily)
+        daily_end = today + timedelta(days=6)
+        df_forecast_daily_seven = df_forecast_daily[
+            df_forecast_daily["date"].between(pd.Timestamp(today), pd.Timestamp(daily_end))
+        ]
+        df_forecast_region_daily = forecast_daily_region_total(df_forecast_daily_seven)
         show_forecast_section(df_forecast_region_daily, selected_forecast_regions)
 
 

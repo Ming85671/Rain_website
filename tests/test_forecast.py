@@ -59,6 +59,34 @@ class ForecastBatchTests(unittest.TestCase):
 
 
 class ForecastRegionAverageTests(unittest.TestCase):
+    def test_weekly_outlook_prefers_observed_past_days_and_requires_complete_ports(self):
+        today = pd.Timestamp("2026-09-30").date()
+        dates = pd.date_range("2026-09-28", "2026-10-11")
+        forecast = pd.DataFrame([
+            {"region_group": "Palawan", "port_name": port, "date": day,
+             "precipitation_mm": 100.0 if port == "Incomplete" else 10.0}
+            for port in ("Complete", "Incomplete") for day in dates
+            if not (port == "Incomplete" and day == pd.Timestamp("2026-10-04"))
+        ])
+        historical = pd.DataFrame([
+            {"region_group": "Palawan", "port_name": "Complete", "date": day,
+             "precipitation_mm": 3.0}
+            for day in pd.date_range("2026-09-28", "2026-09-30")
+        ])
+
+        result = rain.weekly_rainfall_outlook(historical, forecast, today)
+        palawan = result[result["region_group"] == "Palawan"].reset_index(drop=True)
+        overall = result[result["region_group"] == "Philippines overall"].reset_index(drop=True)
+
+        self.assertEqual(palawan["hover_label"].tolist(), [
+            "2026-09-28 to 2026-10-04", "2026-10-05 to 2026-10-11"
+        ])
+        self.assertEqual(palawan["port_count"].tolist(), [1, 2])
+        self.assertEqual(palawan["historical_port_days"].tolist(), [2, 0])
+        self.assertEqual(palawan["forecast_port_days"].tolist(), [5, 14])
+        self.assertEqual(palawan["average_precipitation_mm"].tolist(), [8.0, 55.0])
+        self.assertEqual(overall["average_precipitation_mm"].tolist(), [8.0, 55.0])
+
     def test_forecast_daily_region_total_includes_per_port_daily_average(self):
         df_daily = pd.DataFrame(
             [
@@ -138,6 +166,31 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
     def _regional_rows(self, result):
         return result[result["region_group"] != "Philippines overall"].reset_index(drop=True)
 
+    def test_monday_sunday_weeks_do_not_split_at_month_or_year_boundary(self):
+        dates = list(pd.date_range("2025-12-29", "2026-01-04")) + list(
+            pd.date_range("2026-09-21", "2026-10-04")
+        )
+        rows = pd.DataFrame([
+            {"region_group": "Palawan", "port_name": "Port A", "date": day,
+             "precipitation_mm": 7.0}
+            for day in dates
+        ])
+
+        result = self._regional_rows(
+            rain.historical_seven_day_region_average(rows, selected_years=[2026])
+        )
+
+        self.assertEqual(result["hover_label"].tolist(), [
+            "2025-12-29 to 2026-01-04",
+            "2026-09-21 to 2026-09-27",
+            "2026-09-28 to 2026-10-04",
+        ])
+        self.assertEqual(result["window_label"].tolist(), [
+            "Dec 29-Jan 4", "Sep 21-27", "Sep 28-Oct 4"
+        ])
+        self.assertEqual(result["observation_days"].tolist(), [7, 7, 7])
+        self.assertEqual(result["average_precipitation_mm"].tolist(), [7.0, 7.0, 7.0])
+
     def test_historical_seven_day_region_average_uses_non_overlapping_windows(self):
         rows = []
         for day, precipitation in enumerate(range(1, 16), start=1):
@@ -159,9 +212,9 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
 
         self.assertEqual(len(regional_result), 3)
         self.assertEqual(regional_result["year"].tolist(), [2026, 2026, 2026])
-        self.assertEqual(regional_result["window_label"].tolist(), ["Jan 1-7", "Jan 8-14", "Jan 15-15"])
-        self.assertEqual(regional_result["window_sort"].tolist(), [1, 8, 15])
-        self.assertEqual(regional_result["average_precipitation_mm"].tolist(), [4.0, 11.0, 15.0])
+        self.assertEqual(regional_result["window_label"].tolist(), ["Dec 29-Jan 4", "Jan 5-11", "Jan 12-18"])
+        self.assertEqual(regional_result["window_sort"].tolist(), [-2, 5, 12])
+        self.assertEqual(regional_result["average_precipitation_mm"].tolist(), [2.5, 8.0, 13.5])
 
     def test_historical_seven_day_region_average_averages_ports_inside_window(self):
         rows = [
@@ -208,7 +261,7 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
         overall = result[result["region_group"] == "Philippines overall"].reset_index(drop=True)
 
         self.assertEqual(len(overall), 1)
-        self.assertEqual(overall.loc[0, "window_label"], "Jan 1-1")
+        self.assertEqual(overall.loc[0, "window_label"], "Dec 29-Jan 4")
         self.assertEqual(overall.loc[0, "port_count"], 3)
         self.assertEqual(overall.loc[0, "observation_days"], 1)
         self.assertEqual(overall.loc[0, "average_precipitation_mm"], 6.0)
@@ -232,13 +285,46 @@ class HistoricalSevenDayAverageTests(unittest.TestCase):
         result = rain.historical_seven_day_region_average(pd.DataFrame(rows))
         regional_result = self._regional_rows(result)
 
-        self.assertEqual(len(regional_result), 1)
-        self.assertEqual(regional_result.loc[0, "window_label"], "Dec 24-31")
-        self.assertEqual(regional_result.loc[0, "observation_days"], 8)
-        self.assertEqual(regional_result.loc[0, "average_precipitation_mm"], 27.5)
+        self.assertEqual(len(regional_result), 2)
+        self.assertEqual(regional_result["window_label"].tolist(), ["Dec 21-27", "Dec 28-Jan 3"])
+        self.assertEqual(regional_result["observation_days"].tolist(), [4, 4])
+        self.assertEqual(regional_result["average_precipitation_mm"].tolist(), [25.5, 29.5])
 
 
 class HistoricalChartStyleTests(unittest.TestCase):
+    def test_weekly_charts_show_forecast_line_and_bar_separately(self):
+        historical = pd.DataFrame([{
+            "region_group": "Palawan", "year": 2026, "year_label": "2026",
+            "window_start": pd.Timestamp("2026-09-21"), "window_sort": 264,
+            "average_precipitation_mm": 4.0,
+            "hover_label": "2026-09-21 to 2026-09-27",
+            "port_count": 1, "observation_days": 7,
+        }])
+        outlook = pd.DataFrame([
+            {"region_group": "Palawan", "window_sort": 271,
+             "average_precipitation_mm": 8.0,
+             "hover_label": "2026-09-28 to 2026-10-04",
+             "historical_port_days": 2, "forecast_port_days": 5, "port_count": 1},
+            {"region_group": "Palawan", "window_sort": 278,
+             "average_precipitation_mm": 12.0,
+             "hover_label": "2026-10-05 to 2026-10-11",
+             "historical_port_days": 0, "forecast_port_days": 7, "port_count": 1},
+        ])
+        with (
+            patch.object(rain.st, "subheader"),
+            patch.object(rain.st, "plotly_chart") as plotly_chart,
+        ):
+            rain.show_historical_region_charts(historical, ["Palawan"], [2026], outlook)
+
+        line, bar = [call.args[0] for call in plotly_chart.call_args_list]
+        forecast_line = line.data[-1]
+        forecast_bar = bar.data[-1]
+        self.assertEqual(forecast_line.line.dash, "dash")
+        self.assertEqual(list(forecast_line.x), [264, 271, 278])
+        self.assertEqual(forecast_bar.marker.color, rain.OUTLOOK_COLOR)
+        self.assertEqual(list(forecast_bar.x), [271, 278])
+        self.assertTrue(bar.data[0].showlegend)
+
     def test_rainfall_axis_max_rounds_above_highest_value(self):
         self.assertEqual(rain.rainfall_axis_max([30.99]), 35)
         self.assertEqual(rain.rainfall_axis_max([35.0]), 40)
