@@ -476,15 +476,41 @@ class CorrelationPageTests(unittest.TestCase):
         self.assertIn("normal wet season", result["explanation"])
         self.assertIn("Unusually wet weeks", result["explanation"])
 
-    def test_correlation_page_renders_overall_weekly_summary(self):
-        source = inspect.getsource(rain.render_correlation_page)
+    def test_simple_answers_do_not_mislabel_weak_positive_or_missing_results(self):
+        for value, expected in [
+            (-0.5, "Yes"), (-0.2, "Yes"), (-0.1, "No clear pattern"),
+            (0.0, "No clear pattern"), (0.1, "No clear pattern"),
+            (0.2, "No —"), (float("nan"), "There is not enough data"),
+        ]:
+            with self.subTest(value=value):
+                self.assertTrue(rain.rainfall_relationship_answer(value, "volume_mt", "months").startswith(expected))
 
-        self.assertIn("Overall weekly correlation", source)
-        self.assertIn("weekly_metric_summary(weekly, scope, metric)", source)
-        self.assertIn("all {weekly_summary[\"weeks\"]} complete weeks", source)
-        self.assertIn("What is driving the weekly relationship?", source)
-        self.assertIn("Raw weekly", source)
-        self.assertIn("Compares unusual weeks", source)
+    def test_simple_page_keeps_both_metrics_visible_and_filters_together(self):
+        from streamlit.testing.v1 import AppTest
+
+        app = AppTest.from_string("import rain\nrain.render_correlation_page()").run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(app.radio[0].value, "Monthly")
+        self.assertEqual([control.label for control in app.selectbox], ["Region", "Detailed metric"])
+        self.assertFalse(app.expander[0].proto.expanded)
+        self.assertEqual(len(app.expander[0].get("plotly_chart")), 3)
+        for scope, period in [("Philippines weighted", "Monthly"), ("Philippines weighted", "Weekly"), ("Other-Check", "Weekly")]:
+            with self.subTest(scope=scope, period=period):
+                app.selectbox[0].set_value(scope)
+                app.radio[0].set_value(period).run()
+                self.assertEqual(len(app.exception), 0)
+                weekly, monthly, *_ = rain.load_correlation_outputs()
+                for metric in ["volume_mt", "shipments"]:
+                    result = (
+                        rain.monthly_metric_summary(monthly, scope, metric)
+                        if period == "Monthly"
+                        else rain.weekly_metric_summary(weekly, scope, metric)
+                    )
+                    expected = rain.rainfall_relationship_answer(result["raw"], metric, "months" if period == "Monthly" else "weeks")
+                    self.assertIn(expected, [element.value for element in app.markdown])
+                    self.assertTrue(any(f"r = {result['raw']:+.2f}" in element.value for element in app.caption))
+                self.assertIn("Rainfall × Shipment volume (MT)", str([element.value for element in app.markdown]))
+                self.assertIn("Rainfall × Vessel loadings (voyages)", str([element.value for element in app.markdown]))
 
     def test_correlation_page_title_matches_selected_metric(self):
         self.assertEqual(

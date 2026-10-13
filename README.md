@@ -50,6 +50,13 @@ analyzed separately. Raw weekly Pearson, weekly Spearman, monthly, and fixed-
 weight national results are robustness checks. The exported fixed regional
 weights make the national aggregation auditable.
 
+The dashboard presents shipment volume and vessel loadings side by side,
+with one region filter and a monthly/weekly switch. Each card answers whether
+wetter periods tend to have lower shipments, with its correlation and paired
+sample size. Vessel loadings count shipment records, not unique vessels.
+Seasonality, lag and rolling-correlation charts are in a collapsed detail panel.
+Strength labels are descriptive rather than significance tests.
+
 Correlation describes association, not causation.
 
 The command writes:
